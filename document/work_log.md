@@ -1,0 +1,347 @@
+# 作業リスト
+
+最終更新: 2026-04-16
+
+## 2026-04-10
+
+- Android プロジェクトの構成、記録サービス、UI、インポート処理を解析した
+- データ削除、グラフ期間、StepWalk 歩数変換、GPS 更新処理などの不具合候補を洗い出した
+- 主要な不具合修正を実装し、`compileDebugKotlin` の成功を確認した
+- 変換用 Python スクリプトと中間 JSONL / 最終 CSV を `log_converter` フォルダへ整理した
+- `merge_logs.py` を削除した
+- 標準データ形式の初版仕様書 `data_spec.md` を作成した
+- Room 内部データ仕様書 `room_data_spec.md` を作成した
+- import / export 仕様書 `import_export_spec.md` を作成した
+- Room を nullable / `stepsDelta` ベースへ寄せる実装を開始し、関連するグラフ・地図・ウィジェット処理を更新した
+- export を標準 CSV 形式へ揃え、デバッグログ混在を止めた
+- import を標準 CSV 専用に切り替えた
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- ドキュメント更新ルールと実装原則を `maintenance_policy.md` として明文化した
+- 既存バックアップ CSV を調査し、壊れたログ混在は主にバックアップ末尾のデバッグ追記であることを確認した
+- 端末内データ破損の原因切り分けとして、Room 保存・import・export・日次ログ追記の経路を再解析した
+- 端末内データ保全の観点では、destructive migration、import 対象範囲、ローカル日次 CSV の境界、QNH 算出条件が優先確認項目だと整理した
+- `functional_spec.md`、`design_doc.md`、`todo.md` を現行仕様と調査結果に合わせて更新した
+- Room version 4 から 5 への migration を実装し、`fallbackToDestructiveMigration()` を除去した
+- import 対象を `gps_pressure_full_backup*.csv` と標準ヘッダ一致ファイルへ絞り込んだ
+- import のスキップ件数と解析エラー件数を `ImportReport` とデバッグログで可視化した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- `data_spec.md`、`room_data_spec.md`、`import_export_spec.md`、`functional_spec.md`、`design_doc.md`、`todo.md` を更新した
+- 日常ログとデバッグログの保存先を app-specific external storage 優先へ変更した
+- 日常ログファイルを `GpsUtil.getLoggingStart()` に基づく 03:00 区切りの日次ファイルへ変更した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- 関連仕様書と ToDo を更新した
+- NOAA の公開説明を確認し、海面更正気圧の補正には観測地点の高度が前提であることを再確認した
+- GPS 不在時のセンサーのみ記録では `PresQnh` を保存しないよう変更した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- `data_spec.md`、`room_data_spec.md`、`functional_spec.md`、`design_doc.md`、`todo.md` を更新した
+- `log_converter/step1_extract.py`、`step2_convert.py`、`step3_visualize.py` を標準 CSV 仕様に合わせて改修した
+- `step2_convert.py` を実行し、`gps_pressure_full_backup_converted.csv` を生成して標準ヘッダ出力を確認した
+- `data_spec.md`、`import_export_spec.md`、`design_doc.md`、`todo.md` を更新した
+- アプリ地図が同一日内の再描画で勝手に自動ズームし直さないよう修正した
+- 地図ウィジェットの軌跡描画をアプリ本体と同じセグメント分割方針へ寄せた
+- アプリのグラフ操作を横方向ズーム / 横移動のみに制限した
+- 旧 `stepCount` 互換用の `legacyStepCount` を追加し、歩数表示と歩数グラフが 0 にならないようフォールバックを実装した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- `room_data_spec.md`、`functional_spec.md`、`design_doc.md` を更新した
+- 地図ウィジェットの `ImageView` を `fitXY` に変更し、表示比率の崩れを抑えるよう調整した
+- アプリ起動時にローカル日次 CSV から歩数情報を補完する処理を追加した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- `room_data_spec.md`、`functional_spec.md`、`design_doc.md` を更新した
+- Google ドライブ向けデバッグログ送信設定を追加し、共有フォルダへの自動追記と手動同期を実装した
+- `LoggingService`、import 処理、歩数補完、地図ウィジェット描画で共有デバッグログを出すよう更新した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- `functional_spec.md`、`import_export_spec.md`、`design_doc.md` を更新した
+- Google ドライブのフォルダ選択依存をやめ、import を単一 CSV ファイル選択、デバッグ共有を単一ログファイル選択へ切り替えた
+- `SettingsRepository`、`SettingsViewModel`、`SettingsScreen`、`ExportUtil` をファイル URI ベースへ更新した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- `functional_spec.md`、`import_export_spec.md`、`design_doc.md` を更新した
+
+## 2026-04-11
+
+- モード判定前の補助指標を 3 秒ごとに別保存する方針を決め、`AccelStddev3s`、`AccelMad3s`、`StepDelta3s`、`StepRate3s` を記録対象に定めた
+- 補助センサー判定ログを主記録 CSV と分離し、`motion_metrics_yyyyMMdd.csv` と専用 backup/import/export 仕様を持たせる方針を決めた
+- 歩数センサーは徒歩判定の強化要素として使い、`TYPE_STEP_COUNTER` の遅延を考慮して 9 秒平滑化歩数レートでスコアに寄与させる方針を設計書へ反映した
+- 徒歩強化用の初期定数として `WALK_STDDEV_MIN=0.08`、`WALK_STDDEV_MAX=0.80`、`WALK_STEP_RATE_REF=1.00`、`WALK_ACCEL_WEIGHT=0.65`、`WALK_STEP_WEIGHT=0.35`、`WALK_STEP_BONUS=0.15` を決定した
+- モード体系に `DEVICE_STILL`（完全停止）を追加し、`完全停止 / 停止 / 徒歩 / 高速移動` の 4 段階で扱う方針を仕様へ反映した
+- `DEVICE_STILL` の初期境界値を `AccelStddev3s<=0.03`、`AccelMad3s<=0.02`、15 秒連続と決め、4 モードの GPS 更新間隔を `180 / 60 / 10 / 5` 秒で暫定決定した
+- 4 モードの初期確信度遷移条件として、`DEVICE_STILL=5ウィンドウ`、`STOPPED=2ウィンドウ`、`WALKING=2ウィンドウまたは高スコア即時`、`VEHICLE=2ウィンドウまたは高加速度即時` を決定した
+- `MovementDetector` を 4 モード判定対応へ改修し、`AccelStddev3s`、`AccelMad3s`、`StepDelta3s`、`StepRate3s` を 3 秒ごとに算出・保存する実装を追加した
+- `MotionSample` / `MotionSampleDao` / Room migration `6 -> 7` を追加し、補助センサー判定ログを `motion_samples` テーブルへ保存するようにした
+- `ExportUtil` に `motion_metrics_yyyyMMdd.csv` への日次追記を追加し、主記録 CSV と補助ログ CSV を分離した
+- `LoggingService` の通知と GPS 更新間隔を `DEVICE_STILL / STOPPED / WALKING / VEHICLE` に合わせて更新した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- 設定画面に補助センサー判定ログの手動 export/import UI を追加し、専用 URI 保持と実行フローを `SettingsViewModel` / `ExportUtil` に実装した
+- 補助センサー判定ログ CSV のファイル名検証、ヘッダ検証、`timestamp` 単位マージ、進捗トースト、デバッグログ出力を追加した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- 電池消費観点で全コードを再点検し、起動時の旧歩数修復が毎回走っていたこと、地図画面が再描画ごとに自動フィットしていたこと、ウィジェットが最新値取得で全件走査していたこと、高頻度詳細デバッグログが常時ディスクI/Oしていたことを確認した
+- `SettingsRepository` に `stepRepairVersion` と `verboseDebugLogEnabled` を追加し、起動時歩数修復を一回化した
+- 地図画面の `zoomToBoundingBox()` を日付変更時だけに限定し、同一日内の再描画では再フィットしないようにした
+- `PressureWidgetReceiver` と `PressureWidget` の最新値取得を `getLatest()` ベースに変更し、不要な全件読みを減らした
+- 高頻度ログを `writeVerboseDebugLog()` 経由へ切り替え、設定画面から `詳細デバッグログ` を ON にした時だけ書くようにした
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- `data_spec.md`、`room_data_spec.md`、`import_export_spec.md`、`functional_spec.md`、`design_doc.md`、`todo.md` を更新した
+- 共有デバッグログ `C:\\MyDrive\\android\\log.txt` を確認し、地図ウィジェットの崩れは描画時点で発生していることを確認した
+- 地図ウィジェットだけが GPS 外れ値除去を通していない実装差分を特定した
+- `GpsUtil.prepareMapEntries()` を追加し、地図本体と地図ウィジェットで共通の日次抽出、時系列ソート、GPS 外れ値除去を使うよう統一した
+- `MapWidgetReceiver` のデバッグログに前処理前後件数と描画 bounds を追加した
+- 単発で飛んで元に戻る GPS 点に対して、前後 3 点比較で除去するスパイクフィルタを `GpsUtil.filterOutliers()` に追加した
+- 電車移動のような高速区間でも効くように、前後線分からの横ずれ、余分な迂回距離、折れ角で一時的な横飛び点を除去するフィルタを追加した
+- 共有バックアップ CSV を確認し、2026-04-10 17:54:34 以降に短時間の誤クラスタが入っていることを確認した
+- 誤クラスタ対策として、両端の大ジャンプで囲まれた短時間・少数点クラスタをまとめて除去する処理を追加した
+- 端末内 DB の保持状況を切り分けるため、最古・最新・3時区切り日別件数・0時-2時59分件数をデバッグログへ出力する機能を追加した
+- DB サマリログから、端末 DB の最古時刻が 2026-04-10 03:00:08 であり、それ以前が端末内に存在しないことを確認した
+- ホームグラフを固定 lookback 表示から「表示終端時刻を動かせる」方式へ変更し、左スワイプで古い時間帯へ移動できるようにした
+- ホームグラフはピンチインで可視期間を広げ、より古い時間帯を同時に表示できるようにした
+- 地図の日送りを、位置データが存在する日だけへ遷移する方式へ変更した
+- グラフ表示窓の移動で、保持データ期間が lookback より短い場合に空レンジ例外で落ちる不具合を修正した
+- ホームグラフのジェスチャ処理を `detectTransformGestures` ベースへ切り替え、スワイプとピンチが反応しない状態を修正した
+- ホームグラフのジェスチャを `detectHorizontalDragGestures` と `detectTransformGestures` に分離し、横ドラッグとピンチを個別に安定動作させるよう調整した
+- ホームグラフのサイズ、ドラッグ量、ズーム量を共有デバッグログへ出すようにし、入力が届いているかを実機で切り分けられるようにした
+- 共有ログからホームグラフへの入力自体は届いていることを確認し、1本指ドラッグと2本指ピンチの役割を分離した
+- ホームグラフ上部に現在の表示時間範囲ラベルを追加し、操作結果を視認しやすくした
+- 共有ログから、グラフの時間移動が逆方向かつ感度不足であることを確認した
+- ホームグラフの横ドラッグ方向を修正し、`GRAPH_DRAG_SENSITIVITY` を引き上げて時間移動を反応しやすくした
+- `transformable` 利用箇所に必要な opt-in を追加し、`compileDebugKotlin` 成功を確認した
+- 標準の `draggable` と `transformable` の組み合わせがグラフ用途では不安定だったため、ホームグラフを専用 `pointerInput` ベースへ切り替えた
+- 1本指ドラッグと2本指ピンチを同一ハンドラ内で明確に分離し、`compileDebugKotlin` 成功を確認した
+- 上記でも操作感が安定しなかったため、ホームグラフの入力を Android 標準の `GestureDetector` / `ScaleGestureDetector` ベースへ切り替えた
+- `pointerInteropFilter` への切り替え後、`compileDebugKotlin` 成功を確認した
+- 利用者フィードバックを受け、ホームグラフの取得方式を Compose の `draggable` / `transformable` に戻した
+- ただしドラッグ中の時間窓更新は UI ローカルに留め、指を離した時だけ ViewModel と DB へ反映するように変更した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- ドラッグ中のローカル時刻 `transientWindowEndMs` を動かしても、系列生成が旧 `windowEndMs` を見続けていた不整合を修正した
+- `transientWindowEndMs` 基準で系列を再生成するようにし、`compileDebugKotlin` 成功を確認した
+- ピンチで描画不能な倍率へ入るとグラフ全体が消える不具合を修正した
+- 候補倍率で `GraphUtil.getProcessedSeries()` が成立する場合だけ zoom を適用するようにし、`compileDebugKotlin` 成功を確認した
+- さらに、系列生成が一時的に `null` になっても前回の正常系列を保持して描画継続するようにした
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- グラフ操作中の重さ対策として、補間・平滑化は読み込み済み履歴に対して一度だけ行い、操作中は前処理済み系列から可視区間だけを切り出す方式へ変更した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- DB からの履歴が新しい順だったため、グラフ側の古い順前提と噛み合わず、非表示やスワイプ不全を招いていたことを確認した
+- グラフ描画前に履歴を timestamp 昇順へ正規化するよう修正し、`compileDebugKotlin` 成功を確認した
+- 横方向の比率ずれは、X 軸基準が表示窓ではなく最初のデータ点時刻になっていたことが原因と確認した
+- X 軸を `graphStartMs..transientWindowEndMs` 基準へ修正し、連続性のために可視窓の直前直後の点も少量含めるようにした
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- 歩数系列を「可視窓での 0 始まり」ではなく「03:00 区切り日ごとの 0 始まり（リセット）」へ変更した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- lookback 設定の扱いを「データが無い区間も含めて期間を守る」に統一し、ホーム画面とウィジェットの X 軸基準を揃えた
+- 地図は日付変更時に自動フィットを再計算し、データが無い日でも初期中心・初期ズームへ戻すようにした
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- 更新反映のたびに実機へ上書きインストールしていた運用を踏まえ、APK 更新後に記録が 08:03 で止まっていた事象を解析した
+- 原因候補として、`BootReceiver` が `BOOT_COMPLETED` しか受けておらず、`MY_PACKAGE_REPLACED` 後に `LoggingService` が自動復帰しない構成差分を特定した
+- `BootReceiver` に `ACTION_MY_PACKAGE_REPLACED` を追加し、アプリ更新後も `LoggingService` を自動再開するよう修正した
+- 端末終了・端末再起動・アプリ更新後再開を切り分けるため、`SERVICE_RECEIVER`、`SERVICE_START_COMMAND`、`SERVICE_FIRST_RECORD_SUCCESS` の調査ログを追加した
+- CSV に `#` コメント行を許可する方針を反映し、標準CSV import、補助ログ import、起動時のローカルCSV歩数復旧でコメント行と空行を読み飛ばすよう修正した
+- 新規作成する日次CSVと手動バックアップCSVには、ヘッダ前コメント行を付与するよう更新した
+- 通常の `writeDebugLog()` イベントを日次CSVへ `# EVENT <timestamp> ...` として追記し、手動バックアップCSVにも時系列順で反映するよう更新した
+- `log_converter/step3_visualize.py` を更新し、`# EVENT` コメント付きバックアップCSVをそのまま読み込めるようにした。可視化時は `#` コメント行を無視し、`Lat=0 / Lon=0` の無効 GPS は地図から除外する
+- Windows 確認用ビューアを `window_viewer/step3_visualize.py` へ移動し、`window_viewer/README.md` に起動方法を追記した
+- `window_viewer/venv` を作成し、Windows ビューア用の将来の Python 追加ライブラリを隔離できるようにした
+- `window_viewer/step3_visualize.py` の既定表示を、`C:\MyDrive\android` の最新バックアップ優先かつ「最後の長い空白以降の最新セッション」のみ表示する形に更新した
+- `MapScreen` の auto-fit 条件を見直し、日付変更直後の古い `entries` で fit 完了扱いにならないよう修正した。対象日の `entries` が実際に届いたときだけ 1 回 fit し、ユーザー操作中の再fitは防ぐ
+- `window_viewer/step3_visualize.py` にアプリ相当の補正ロジックを移植し、HTML 上で `補正あり / なし` を切り替えられるよう更新した
+- `window_viewer/step3_visualize.py` のグラフ補正を `GraphUtil.getProcessedSeries()` 相当へ寄せ、外れ値除去・30 秒間隔線形補間・移動平均平滑化まで viewer 側へ反映した。今後は表示ロジック変更時に app / viewer の両方を同期して更新する方針を仕様へ明記した
+- `window_viewer/step3_visualize.py` に viewer 専用の `GPS 平準化 OFF / ON` 切替を追加し、地図の折れ線だけを見比べられるようにした
+- アプリ地図の折れ線表示に、停止点は保持したまま移動区間だけを軽く平準化する `GpsUtil.smoothTrackForDisplay()` を追加した
+- `MapWidgetReceiver` にも `GpsUtil.smoothTrackForDisplay()` を適用し、本体地図とウィジェットの折れ線平準化を共通化した
+- 開始点・現在点・滞在点のマーカーサイズ規則を `GpsUtil.MarkerStyle` へ寄せ、本体地図とウィジェットで共通化した
+- アプリ地図の開始点・現在点・滞在点は見やすさのため共通ルールに倍率を掛け、ウィジェットの見え方は維持した
+- アプリ地図のマーカー倍率調整を撤回し、開始点・現在点・滞在点をウィジェットと同じ共通サイズ規則へ統一した
+- 同じ半径値でも描画面で体感差が出るため、`GpsUtil.MarkerSurface` ごとに倍率を管理する形へ整理し、app / widget の見え方差を共通ロジックで吸収するよう更新した
+- `MapScreen` の marker icon 生成を `BitmapDrawable(resources, bmp)` へ修正し、density 未設定によるアプリ地図のマーカー縮小表示を避けるようにした
+- GPS の `minUpdateIntervalMillis` は、早く届く位置を抑制しすぎない方針として全モード `1 秒` に統一する仕様を決定した
+- 主記録は 3 秒スロット単位・欠損許容とする方針を仕様へ反映し、3 秒スロット内のセンサー集約規則は別途検討項目として切り出した
+- GPS の 3 秒スロット集約規則として、移動中は `before` とスロット内 GPS 群によるスプライン補間、完全停止中は平均化を使う方針を仕様へ反映した
+- Room は即時保存、ファイルだけ遅延書き出しにする方針を確定し、3 秒主記録・CSV キュー 100 件 flush の仕様を文書へ反映した
+- 停止 `STOPPED` は完全停止寄り平均、GPS 補間は 3 次スプライン、気圧は最新保持値、歩数初期値は `0` で扱う方針を確定した
+- `MovementDetector` の GPS `minInterval` を全モード `1 秒` へ統一した
+- `LoggingService` を 3 秒スロット駆動へ変更し、同一ループで主記録生成・補助指標生成・モード更新・ウィジェット更新判定を行う構成へ整理した
+- `LoggingService` に GPS プール集約を追加し、`WALKING / VEHICLE` では 3 次スプライン補間、`DEVICE_STILL / STOPPED` では平均化で 3 秒主記録へ GPS / 高度を落とし込むようにした
+- 主記録と補助指標は Room へ即時保存しつつ、日次 CSV と補助ログ CSV への書き出しだけを `ExportUtil` のメモリキュー 100 件 flush へ切り替えた
+- 手動 export 前とサービス終了時に未書込キューを flush するよう更新した
+- 設定画面の旧「記録間隔」スライダを撤去し、主記録周期が 3 秒固定であることを表示するよう更新した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- 実機歩行ログで `WALKING -> VEHICLE -> WALKING` の往復が多発していることを確認し、`VEHICLE` 判定を徒歩側へ少し寄せる調整を行った
+- `MovementDetector` の `VEHICLE` 進入閾値を引き上げ、`VEHICLE` 確定に必要な連続ウィンドウ数も 3 へ増やした
+- 歩数レートと `walkingScore` が十分高い時は `VEHICLE` を抑制し、徒歩中の一時的な加速度ピークで `VEHICLE` へ跳ねにくいよう更新した
+- 上記変更後の `compileDebugKotlin` 成功を確認した
+- 表示専用の停止標準化 `GpsUtil.normalizeStopsForDisplay()` を追加し、停止候補区間の GPS ブレを目標半径以内へ抑える仕組みを実装した
+- 地図の停止標準化表示 ON / OFF を DataStore 設定として追加し、設定画面から切り替えられるよう更新した
+- 本体地図と地図ウィジェットは、設定が ON の時だけ停止標準化済み系列を描画に使うよう揃えた
+
+## 2026-04-12
+
+- 運用方針を見直し、Android 側では地図の停止標準化を常時適用し、設定画面からの ON / OFF 切り替えは撤去した
+- `MapScreen` と `MapWidgetReceiver` を整理し、停止標準化済み系列を固定で使う構成へ戻した
+- `SettingsRepository`、`SettingsViewModel`、`SettingsScreen` から停止標準化設定の保持と UI を削除した
+- Windows viewer `window_viewer/step3_visualize.py` には停止標準化 `OFF / ON` の比較 UI を追加し、確認作業は viewer 側で行えるようにした
+- viewer は地図用 GPS 点列について、停止標準化なし / あり の両系列を持ち、グラフ補正と独立に切り替えられるよう更新した
+- viewer の停止標準化は `MODE_CONFIRMED` の `DEVICE_STILL / STOPPED` 区間にだけ適用するよう見直した
+- viewer の停止標準化パラメータを `DEVICE_STILL` と `STOPPED` で分離し、完全停止と停止で補正強度を別調整できるよう更新した
+- viewer の停止標準化は、停止区間ごとにスプライン系丸めを行ったうえで、1回の移動距離と区間半径をモード別に制約する方式へ更新した
+- viewer の停止標準化を再調整し、スプライン系丸めを優先し、`nメートル` 系パラメータは厳密拘束ではなく目標値として扱うよう更新した
+- viewer の停止標準化について、`DEVICE_STILL` 用と `STOPPED` 用の丸め点数を 3..10 のプルダウンで変更できるよう更新した
+- viewer の停止標準化を `Hampel -> Savitzky-Golay` へ切り替え、停止区間の単発スパイク除去と連続変化保持を両立する方向へ更新した
+- viewer の停止標準化に、Hampel 後も残る短いスパイク塊を補修する段を追加した
+- viewer の停止標準化は一度リセットし、停止区間中央値に対する偏差列ベース方式へ差し替えた
+- viewer の停止標準化は、局所中央値からの残差が大きい点だけを補正し、なめらかな低周波うねりは残す方針へ更新した
+- viewer の停止標準化は、停止区間を半径で途中分断せず `MODE_CONFIRMED` の連続区間をそのまま対象にし、短いバースト塊を先に補修する段を追加した
+- viewer に `停止偏差` グラフを追加し、停止区間中心からの偏差列を raw / 補正後で見比べられるよう更新した
+- viewer の `停止偏差` グラフにピーク周辺フォーカスを追加し、全期間表示だけで差が見えにくい問題を緩和した
+- viewer のバースト塊長を `DEVICE_STILL=6点`, `STOPPED=5点` へ広げ、主ピークの尾を少し長めに補修する方向へ調整した
+- viewer の停止標準化に半径圧縮段を追加し、偏差の向きを保ったまま中心からの距離だけを縮める方式を試験導入した
+- viewer に `日付` プルダウンを追加し、読み込んだバックアップ内の各日付へグラフ・地図・イベントを切り替えられるよう更新した
+- viewer の停止標準化前段に、`stepsDelta=0` かつ `displayMode != VEHICLE` の点列を対象とした `cluster hop stay` 検知を追加し、短時間だけ別クラスタへ滞在して前後クラスタへ戻る偽クラスタ FIX を前後アンカー中点へ補正するよう更新した
+- 最新ログ `gps_pressure_full_backup_20260412_155523.csv` の 11:28 台では、`2026-04-12 11:28:14 -> 11:31:03` の 18 点を 1 個の偽クラスタ滞在として検知できることを内部シミュレーションで確認した
+- `cluster hop stay` と認定した点群は前後アンカー中点へ全置換したうえで `clusterHopFixed` としてマークし、後段の停止標準化では再び弱補正しないよう更新した
+- viewer の `停止偏差` グラフは、クラスタホップ補正後に `補正後偏差` を描くと誤解を招くため、`raw 偏差` と `補正量 (raw -> corrected の移動距離)` を比較する定義へ切り替えた
+- viewer の停止標準化前段に `return burst` 検知を追加し、`10:50-11:30` のような「大ジャンプ後に数点から数十点で元クラスタへ戻る」異常を、ジャンプ直前点と復帰アンカーの補間で戻すよう更新した
+- `return burst` の戻り判定距離は初期値 `90m` とし、`11:03`, `11:10`, `11:13`, `11:15`, `11:21`, `11:28` 付近の大ジャンプが viewer シミュレーションで抑えられることを確認した
+- viewer の地図に `地図時間` 切替を追加し、`偏差フォーカス連動` を選ぶと停止偏差グラフで選んだ時間帯だけの軌跡を描けるよう更新した
+- viewer で試した停止系表示補正を、Android 側へ載せる前提の仕様として整理し、`viewer 試験済み / Android 未反映` を明記した
+- Android 反映時の適用対象を `MapScreen` / `MapWidgetReceiver` の表示用系列だけに限定し、取得値・保存値は変更しない方針を仕様へ反映した
+
+## 2026-04-13
+
+- 方針を切り替え、Windows viewer で検証した停止系表示補正を Android アプリの**表示部分**へ移植する作業に着手した
+- `GpsUtil` の表示用停止補正を置き換え、`MotionSample` から再構成したモード列に基づいて `復帰バースト -> 偽クラスタ滞在 -> 停止標準化` の順に適用する表示専用パイプラインを実装した
+- `MapViewModel` は日次 `LogEntry` に加えて同日 `MotionSample` も読み込み、表示補正済みの地図系列を返すよう更新した
+- `MapScreen` は ViewModel が返す表示補正済み系列をそのまま描画に使う形へ整理し、画面内の旧停止標準化呼び出しを撤去した
+- `MapWidgetReceiver` も同日 `MotionSample` を読み込んだうえで、`GpsUtil` の新しい表示補正済み系列を描画に使うよう更新した
+- これらの変更は**取得値・Room 保存値・CSV 出力値を変更せず**、地図表示用系列だけに適用する構成で実装した
+- `viewer` を基準に見え方を揃える方針へ切り替え、`GpsUtil.buildDisplayPolyline()` を追加して、アプリ本体とウィジェットの折れ線生成を同じ共通関数へ統一した
+- `./gradlew.bat :app:compileDebugKotlin` を実行し、Android 側表示補正の移植後もビルド成功を確認した
+- `functional_spec.md`、`design_doc.md`、`todo.md`、`work_log.md` を現状に合わせて更新した
+- アプリ地図と地図ウィジェットの現在点マーカーを、白地に青リングの hollow style へ統一した
+- AppWidgetProvider XML の `updatePeriodMillis` を無効化し、ウィジェット更新を `LoggingService` の設定周期更新へ一本化した
+- `GraphUtil.resolveLatestMetricValues()` を追加し、標高 / 生気圧 / 補正気圧の最新値表示が欠損時も直近履歴へフォールバックするよう更新した
+- `GraphUtil.getProcessedSeriesForWindow()` を追加し、app / widget のグラフを同じ固定時間窓生成ロジックへ統一した
+- `HomeScreen` は固定時間窓の系列を直接使うよう整理し、widget と同じ X 軸基準で初期表示するよう更新した
+- `PressureWidgetReceiver` のグラフ生成も固定時間窓基準へ更新し、`表示する期間=24時間` のとき app 初期表示と同じ左端 / 右端を使うよう修正した
+- `LoggingService` に停止中 GPS bootstrap と直近有効 GPS 再利用を追加し、再起動直後や 03:00 境界直後に GPS がいつまでも再開しないケースの対策を実装した
+- 停止中 GPS bootstrap は `lastLocation` と `getCurrentLocation()` を cooldown 付きで使い、直近有効 GPS が新しい間はスロット時刻へ延長して再利用する形に整理した
+- `./gradlew.bat :app:compileDebugKotlin` を再実行し、今回の bug fix 5 件を含む変更後もビルド成功を確認した
+- 現在点マーカーの青リング線幅が赤リングより細かったため、`GpsUtil.currentMarkerStyle()` に専用 strokeWidth を追加して app / widget とも同じ線幅へ統一した
+- widget 更新周期は「前回更新からの経過時間」で見る素朴な判定から、「次回予定時刻に達したか」で管理する方式へ変更し、指定周期より短く更新されにくいよう整理した
+- ウィジェット短時間更新の原因を、LoggingService 定期更新とは別に onUpdate() / ACTION_APPWIDGET_UPDATE / onAppWidgetOptionsChanged() が即再描画していたことと特定した
+- PressureWidgetReceiver の self-broadcast を廃止し、pressure / map widget の両方に receiver 側の最終描画時刻ガードを追加した
+- MapWidgetReceiver.onAppWidgetOptionsChanged() は即再描画をやめ、サイズは次回描画時に getAppWidgetOptions() から読む構成へ整理した
+- SettingsRepository に pressure / map widget の最終描画時刻を保存するキーを追加し、サービス再起動をまたいでも設定周期より短く再描画しない土台を入れた
+
+## 2026-04-14
+
+- 設定画面の `表示する期間` をスライダ方式から `6h / 12h / 1d / 2d / 3d / 1w` の選択式へ変更し、既定値を `3d` に更新した
+- `SettingsViewModel.setLookbackMin()` を分単位の直接保存へ整理し、旧スライダ前提の時間変換を削除した
+- pressure / map widget の更新間隔は、UI と DataStore の両方で `30秒..300秒` に統一した
+- `SettingsRepository` の widget 更新間隔フローと setter に clamp を追加し、古い設定値が残っていても許容範囲へ収まるようにした
+- 完全停止 `DEVICE_STILL` 中は GPS ブレをさらに強く寄せる方針を反映し、viewer と Android の停止標準化パラメータを `softStart=2m / hardCap=2m` へ揃えた
+- Windows viewer を `pywebview` ベースの独立アプリとして起動できる構成を追加した
+- `viewer_app.py` / `desktop_app/*` を追加し、CSV 選択・最新再読込・view / correction 切替を JS bridge 経由で行えるようにした
+- 独立アプリ版でもアルゴリズムは `step3_visualize.py` を再利用する構成とし、desktop app 側へ補正ロジックを重複実装しない方針に整理した
+- `ViewerApi` が古い summary キー名 `first_dt / last_dt` を参照して初期 state 生成に失敗していたため、現行の `first / last` へ修正した
+- Windows viewer の CSV 手動読込で、先頭列が日時文字列 (`YYYY-MM-DD HH:MM:SS`) のファイルを開くと `float` 変換で失敗していたため、ミリ秒 timestamp と日時文字列の両方を受ける `parse_timestamp_value()` を追加した
+- `pywebview` 独立アプリ起動時に `[pywebview] ... maximum recursion depth exceeded` が出る件は、`js_api` に `window` オブジェクトを保持していた構成が原因候補と判断し、`ViewerApi` から window 保持を撤去した
+- ファイルダイアログは `webview.active_window()` / `webview.windows[0]` からその場で取得する方式へ変更し、`js_api` には基本オブジェクトだけを持たせる形に整理した
+- 独立アプリで CSV 切替時に「何も表示されない」ことがあったため、desktop app は毎回同じ `merged_dashboard.html` を上書きせず、一意な HTML を `window_viewer/desktop_cache/` へ生成して iframe を差し替える方式へ変更した
+- `pywebview` の `OPEN_DIALOG` 非推奨警告に合わせ、利用可能なら `FileDialog.OPEN` を使うよう更新した
+- `window_viewer/launch_viewer.ps1` を追加し、venv 上の Python で viewer 独立アプリを起動しやすくした
+- `document/technical_memo_pywebview.md` を追加し、pywebview 採用理由、構成方針、既知の注意点を残した
+- 独立 viewer の表示安定化のため、iframe の `src` は unique HTML の file URI をそのまま渡すようにし、不要な `?t=...` クエリ付与を撤去した
+- `desktop_app.state` の `step3_visualize` import を相対 import 優先に整理し、repo ルートからの smoke test でも壊れないようにした
+- `C:\\MyDrive\\android\\gps_pressure_full_backup_20260410_000528.csv` を使った viewer build を再確認し、dashboard 生成と unique HTML 出力が正常終了することを確認した
+- 独立 viewer で「CSV は読めるが何も表示されない」問題に対して、dashboard の表示経路を `iframe + file:///...` から `iframe.srcdoc` へ切り替えた
+- `ViewerApi` は生成済み dashboard HTML 本文を返すようにし、shell 側はローカル file URI ではなく HTML 文字列を直接描画する構成へ整理した
+- viewer の地図に `>` 風の進行方向マーカーを追加し、比較的まっすぐで向きが安定している区間だけに固定サイズで表示するようにした
+- 進行方向マーカーは、始点終点付近・短すぎる線分・急カーブを避け、一定距離ごとに差し込む方式にした
+- 進行方向マーカーの回転角が 90 度ずれていたため、GPS 方位角（北=0度）と `>` 文字の基準向き（右向き=0度）の差分 `-90度` を反映して修正した
+- 進行方向マーカーの色を折れ線と同じ青へ揃え、密度は約 1/3 になるよう最小間隔を広げた
+- viewer の歩数グラフと地図折れ線を `DisplayMode` ごとのセグメント色分けへ変更し、`DEVICE_STILL=黒 / STOPPED=グレー / WALKING=白 / VEHICLE=青` を適用した
+- viewer のモード別配色を見直し、`DEVICE_STILL=黒 / STOPPED=グレー / WALKING=青 / VEHICLE=赤` へ更新した
+- Android 側の `GpsUtil` にモード色と進行方向マーカー共通ロジックを追加し、app / widget の地図折れ線を `DEVICE_STILL=黒 / STOPPED=グレー / WALKING=青 / VEHICLE=赤` で統一した
+- Android 側の地図画面と地図ウィジェットに `>` 進行方向マーカーを追加し、viewer と同じ向き補正 `bearing - 90度` と控えめな配置密度を適用した
+- Android 側の歩数グラフは `MotionSample` から再構成したモード列を使い、`黒 / グレー / 青 / 赤` の 4 系列へ分割描画するよう更新した
+- Android 側の補正気圧系列色を青系から白へ変更した
+- `./gradlew.bat :app:compileDebugKotlin` を実行し、上記の地図・グラフ表示変更後もビルド成功を確認した
+- Windows viewer の corrected 表示を Android 固定描画へ寄せ直し、地図補正順序を `復帰バースト -> 偽クラスタ滞在 -> 停止標準化 -> GPS 平準化` に固定した
+- Windows viewer の補正気圧系列色を Android と同じ白へ揃え、歩数グラフと地図折れ線のモード色も Android 定義に合わせて確認した
+- Windows viewer では CSV に MotionSample が含まれないため、`# EVENT` の `MODE_CONFIRMED` から Android の確定モード遷移と同じ考え方の表示モード列を再構成する方針を明文化した
+- Windows viewer から、今の corrected 固定描画で使わない古い補助関数 `buildStepModeSeries()` を削除した
+- Android 側で `>` 進行方向マーカーが見えにくかったため、本体地図と地図ウィジェットの両方で白い縁取り付き glyph 描画へ変更し、視認性だけを改善した
+- ホーム画面グラフが重かったため、`GraphUtil.getProcessedSeriesForWindow()` の呼び出しをメインスレッドの `remember` から外し、`produceState + Dispatchers.Default` でバックグラウンド計算するように変更した
+- ピンチ中の候補系列事前計算をやめ、倍率更新だけを即時反映する形にしてジェスチャ中の負荷を下げた
+- 歩数グラフのモード別マスク系列は `ProcessedSeries` ごとに `remember` で保持し、Canvas 再描画のたびに 4 本分を作り直さないようにした
+- 次の設計課題として、加速度変化に応じて GPS 取得間隔を `5秒 / 10秒 / 15秒` で動的制御する案を ToDo へ整理した
+
+## 2026-04-15
+
+- `DEVICE_STILL` の停止標準化パラメータが Android 側で `softStart=2m / hardCap=2m` になっていることを再確認し、完全停止中の GPS ブレを強く中央へ寄せる表示仕様を維持した
+- `MovementDetector` の候補判定ロジックを `computeModeCandidate()` へ集約し、表示再構成側 `GpsUtil.inferModeStates()` と記録判定側が同じ条件を使うよう整理した
+- `MovementDetector` に「移動候補なのに直近 9 秒の歩数増分がほぼ無い場合は `WALKING` へ倒さず `VEHICLE` を優先する」条件を追加した
+- GPS 取得間隔の固定マップを廃止し、`min=m / max=n / mid=((min + max) / 2)` の動的プロファイルへ置き換えた
+- 初期プロファイルとして `DEVICE_STILL=15..180秒`, `STOPPED=15..60秒`, `WALKING=5..10秒`, `VEHICLE=5..15秒` を導入した
+- `MovementDetector.selectGpsIntervalMs()` を追加し、加速度変化が大きい時は短く、変化が小さい時は長く、各状態で `min / mid / max` を選ぶようにした
+- `LoggingService` に現在の GPS 要求間隔状態と最小維持時間を追加し、状態が変わらなくても加速度条件だけで `LocationRequest` を組み替えられるようにした
+- GPS 取得間隔は短くする方向は即時、長くする方向は最小維持時間経過後のみ反映するようにし、間隔の頻繁な伸縮を抑えた
+- `LoggingService` の通知表示も固定モード文言ではなく、実際の GPS 要求間隔秒数を出すよう更新した
+- `./gradlew.bat :app:compileDebugKotlin` を実行し、上記変更後のビルド成功を確認した
+
+## 2026-04-16
+
+- 新しい高精度ハイブリッド状態管理の移行準備として、既存処理へ接続しない独立クラス群を `sensor` package に追加した
+- `MotionStateParams` / `MotionStateParamsProvider` を追加し、k-status 閾値、w-status 判定窓、GPS 間隔、定速領域判定値を一元管理する土台を作った
+- `KStatusDetector` を追加し、重力除去済み 3 軸加速度のノルムから 1 秒窓の `Avg / Var` を計算し、`K1 / K2_K3 / K4` を `On-delay / Off-delay` 付きで判定できるようにした
+- `WStatusDetector` を追加し、判定窓内の歩数増分から `W1 / W2` を独立判定できるようにした
+- `GpsSamplingPolicy` を追加し、`K4` は即時・最短、`W1` は徒歩間隔、`W2` は線形引き延ばしという GPS 取得判断を独立計算できるようにした
+- `ConstantRegionTracker` を追加し、`(K1 or K2_K3) and W2` 区間の GPS 点列へ直線近似を行い、区間終了時に `STAY / CONSTANT_MOVE` を判定できるようにした
+- `FinalContextResolver` と `MotionStateManager` を追加し、新方式の中間状態を既存の `DEVICE_STILL / STOPPED / WALKING / VEHICLE` に変換する接続口を用意した
+- 今回追加した新クラスはまだ `LoggingService` や既存 `MovementDetector` へ接続しておらず、現行アプリの動作は変更していない
+- `document/design_doc.md` に新しい状態管理クラスの役割を追記し、`todo.md` に接続・データ形式確定・実機確認項目を追加した
+- `./gradlew.bat :app:compileDebugKotlin` を実行し、新クラス追加後もビルド成功を確認した
+- `LoggingService` の本体状態管理を旧 `MovementDetector.update()` から `MotionStateManager.updateBaseCycle()` へ置き換えた
+- `MotionStateManager` は専用 single-thread dispatcher 上でのみ更新し、加速度・GPS・歩数・3 秒 base cycle のイベントを同じ owner thread に流す構成へ変更した
+- 加速度入力は `Sensor.TYPE_LINEAR_ACCELERATION` を優先し、未搭載端末では raw accelerometer の重力差分ノルムを fallback として投入するようにした
+- GPS 要求間隔は `GpsSamplingPolicy` の `GpsSamplingDecision` を使い、k4 の即時取得要求では cooldown 付きで `getCurrentLocation()` を呼ぶ構成にした
+- `MotionSample` に `kStatus / kAvg / kVariance / wStatus / gpsIntervalMs / confirmedMode / constantRegionKind` などの新方式列を追加し、Room version を 8 へ更新した
+- 補助センサー判定ログ CSV に新方式列を追加し、import は旧 5 列ヘッダも互換として受け入れるようにした
+- 既存の日次補助ログファイルが旧ヘッダの場合は、次回追記前に新ヘッダへ置き換え、旧行は新方式列 null の互換行として扱うようにした
+- 地図・歩数グラフの表示モード再構成は、新 CSV では `MotionSample.confirmedMode` を優先し、旧 CSV だけ従来の `MovementDetector` 互換ロジックへ fallback するようにした
+- `./gradlew.bat :app:compileDebugKotlin` を実行し、新状態管理接続後もビルド成功を確認した
+- 本体記録経路を再検索し、旧 `MovementDetector.update()` と `MovementDetector.selectGpsIntervalMs()` が `LoggingService` から呼ばれていないことを確認した
+- 旧 `MovementDetector` は `Mode` 型互換と、`confirmedMode` が無い旧 `MotionSample` 表示 fallback 専用として残す方針を `design_doc.md` に明記した
+- `todo.md` の「接続前提」だった項目を実装済み前提の実機確認項目へ更新した
+- 旧 `MovementDetector.selectGpsIntervalMs()` と未使用の旧 GPS 間隔プロファイル定数を削除し、新方式の初期 GPS 要求間隔も `MotionStateParamsProvider.current()` から取得するよう整理した
+- `MotionStateManager` のコメントを現行接続済みの説明へ更新し、`./gradlew.bat :app:compileDebugKotlin` の成功を確認した
+- 標準 CSV に `GpsAccuracy` 列を追加し、export / 日次 CSV 追記で GPS 精度を保存するようにした
+- 標準 CSV import は新 8 列ヘッダと旧 7 列ヘッダの両方を受け入れ、旧 CSV では `GpsAccuracy=null` として扱うようにした
+- 既存の日次 CSV が旧 7 列ヘッダの場合、次回追記前にヘッダを新 8 列へ置き換え、旧行は `GpsAccuracy` 欠損行として扱うようにした
+- `ConstantRegionKind=STAY` は中間判定、`ConfirmedMode` は表示・再構成用の正式状態として扱う方針を `data_spec.md` に明記した
+- `ConstantRegionTracker` に重心距離 + MAD ベースの GPS 外れ値棄却を追加し、直線近似前に孤立点を落とすようにした
+- 定速領域継続中も base cycle ごとに暫定 `STAY / CONSTANT_MOVE` を計算し、`MotionSample.constantRegionKind` に保存するようにした
+- 地図表示用停止補正で、`ConstantRegionKind=STAY` の連続区間を stay point 1 点へ畳み、`CONSTANT_MOVE` は通常の折れ線として残すようにした
+- `MotionSample` と補助ログ CSV に、定速領域の始点・終点・stay point・移動方向を保存する列を追加し、Room version を 9 へ更新した
+
+## 2026-04-17
+
+- ホーム画面とグラフウィジェットの現在歩数表示を、ラベル・数値とも共通の青色に変更した
+- グラフ表示の 00:00 位置を `GraphUtil.midnightTicks()` で共通計算し、ホーム画面とグラフウィジェットの両方に細い白い縦線を描くようにした
+- ホーム画面グラフの従来の時間目盛り縦線は描画せず、目盛りラベルだけ残す形へ整理した
+- 地図画面と地図ウィジェットの進行方向マーカー計算を見直し、急カーブを除外せず、前後数点の局所接線方向から `>` の角度を求めるようにした
+- 上記は表示専用変更であり、GPS 取得・状態判定・保存データ形式は変更していない
+- グラフウィジェットの 00:00 縦線が現在値テキストと下端余白まで貫通していたため、線をプロット領域内に収め、色も補正気圧の白線と重なりにくいグレー寄りへ調整した
+- グラフウィジェットの 00:00 縦線をさらにグレー寄りにし、上端は現在値表示の実測下端、下端は歩数グラフの基準下端に合わせるよう再調整した
+- ウィジェットのタップ遷移が失われる可能性を潰すため、root だけでなく全面 ImageView にも PendingIntent を付け、描画スキップ時も partial update でクリックだけは復旧するようにした
+- ホスト由来の widget 更新は初回配置・復元・再構成を含むため、更新ゲートで止めず描画を許可し、サービス由来更新だけ周期制限する仕様へ整理した
+- グラフウィジェットの 00:00 縦線横に、その線から始まる日付 (`M/d`) を表示するようにした
+- ホーム画面グラフの初回表示が遅い原因として、表示期間の 2 倍を Room から読み込む設計が 3 秒ログでは重すぎることを確認し、取得開始を「表示開始日の 03:00」または 30 分前の早い方へ縮小した
+- 設定画面の表示期間変更がグラフウィジェットに即時反映されなかったため、`PressureWidgetReceiver.forceUpdateAll()` を追加し、表示期間・透明度変更時は更新ゲートを bypass して強制再描画するようにした
+- ホーム画面グラフの表示遅延を再調査し、歩数グラフのモード色分けで各描画点ごとに状態履歴を先頭から走査していたため、3日表示では数億回規模の比較になり得ることを特定した
+- `GpsUtil.modesAt()` を追加し、グラフ描画点と状態タイムラインを時刻順に 1 回だけ前進走査する方式へ変更した
+- 上記は表示用の状態参照高速化のみで、GPS 取得・状態判定・保存データ形式は変更していない
+- `./gradlew.bat :app:compileDebugKotlin` を実行し、グラフ高速化後もビルド成功を確認した
+- ホーム画面グラフで古い方向へスワイプしても戻れない原因として、ドラッグ中の下限が現在ロード済み履歴の最古時刻に固定され、ViewModel へ古い DB 範囲の読込要求が届かないことを確認した
+- グラフのドラッグ中下限をロード済み最古時刻ではなく時刻 0 まで許容し、指を離した後は既存の `HomeViewModel.shiftGraphWindowBy()` が DB 全体の保持範囲で安全に丸める構成へ変更した
+- ピンチアウトで表示期間が設定値より広がるのに読込範囲が設定値分しかなかったため、ViewModel は最大ピンチアウト倍率 2 倍分まで先読みするようにした
+- 最大ピンチアウト倍率は `GraphUtil.MAX_ZOOM_OUT_FACTOR` に定数化し、HomeScreen の最小 zoom 値と HomeViewModel の読込範囲が同じ値を参照するようにした
+- ピンチで可視期間を短くした後も `HomeViewModel.shiftGraphWindowBy()` が設定表示期間で下限を丸めていたため、最古データ + 設定期間より前へ戻れなくなる問題を確認した
+- `HomeViewModel.shiftGraphWindowBy()` に現在の可視期間を渡し、DB 範囲の下限丸めを「設定表示期間」ではなく「実際に表示している期間」で行うように修正した
+

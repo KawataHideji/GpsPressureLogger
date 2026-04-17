@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">GPS気圧ロガー</string>
+    <string name="widget_name">気圧・標高ウィジェット</string>
+    <string name="map_widget_name">GPS軌跡マップウィジェット</string>
+</resources>

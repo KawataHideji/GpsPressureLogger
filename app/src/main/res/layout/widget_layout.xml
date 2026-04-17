@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 上2/3:地図  下1/3:グラフ（数値込み） テキストビューなし、全描画はBitmapで -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_background"
+    android:orientation="vertical">
+
+    <!-- GPS軌跡マップ（上2/3） -->
+    <ImageView
+        android:id="@+id/widget_map"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="2"
+        android:scaleType="fitXY"
+        android:contentDescription="GPS軌跡" />
+
+    <!-- 気圧・標高グラフ（下1/3）数値込み -->
+    <ImageView
+        android:id="@+id/widget_graph"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:scaleType="fitXY"
+        android:contentDescription="気圧グラフ" />
+
+</LinearLayout>
