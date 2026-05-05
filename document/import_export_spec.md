@@ -1,6 +1,6 @@
 # Import / Export 仕様書
 
-最終更新: 2026-04-16
+最終更新: 2026-04-26
 
 ## 1. 目的
 
@@ -34,7 +34,7 @@ Timestamp,Lat,Lon,Alt,PresRaw,PresQnh,StepsDelta,GpsAccuracy
 ヘッダ:
 
 ```csv
-Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAvg,KVariance,KConfidence,WStatus,StepDeltaWindow,GpsIntervalMs,GpsImmediate,ConfirmedMode,ConstantRegionKind,ConstantRegionSpeedKmh,ConstantRegionStartLat,ConstantRegionStartLon,ConstantRegionEndLat,ConstantRegionEndLon,ConstantRegionStayLat,ConstantRegionStayLon,ConstantRegionDirectionDeg
+Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAvg,KScalarAvg,KDirectionalityRatio,KVariance,TrKStatus,TrKRawStatus,TrKAvg,TrKDirectionalityRatio,WStatus,StepDeltaWindow,GpsIntervalMs,GpsImmediate,ConfirmedMode,ConstantRegionKind,ConstantRegionSpeedKmh,ConstantRegionStartLat,ConstantRegionStartLon,ConstantRegionEndLat,ConstantRegionEndLon,ConstantRegionStayLat,ConstantRegionStayLon,ConstantRegionDirectionDeg
 ```
 
 ### 2.3 非対象
@@ -68,6 +68,9 @@ export は次の用途に使う。
 - 欠損は空欄
 - 補助センサー判定ログを出力する場合は、主記録とは別ファイルに分ける
 - 設定画面からは主記録バックアップと補助センサー判定ログバックアップを個別に出力できる
+- export は `ACTION_CREATE_DOCUMENT` で作成した文書 URI へ直接書き込む
+- export 成功判定は「書き込み例外なし」だけでなく、「close 後に文書サイズが 0 byte より大きいこと」も必須とする
+- `openOutputStream()==null`、書き込み例外、close 後 0 byte 文書のいずれかは失敗扱いとし、可能ならその場で空ファイルを削除する
 
 ### 3.3 データ源
 
@@ -166,6 +169,7 @@ export は次の用途に使う。
 - 補助センサー判定ログは別系列の日常ログとして `motion_metrics_yyyyMMdd.csv` を用いる
 - 日次 CSV と補助ログ CSV への書き出しは、メモリキュー 100 件到達時または強制フラッシュ時にまとめて行う
 - 手動 export 開始時は、バックアップ CSV 生成前に未書込キューを日次 CSV 側へ flush する
+- 手動 export 成功時は `EXPORT_STANDARD_OK` / `EXPORT_MOTION_OK`、失敗時は `EXPORT_STANDARD_FAILED` / `EXPORT_MOTION_FAILED` を debug log へ残す
 
 ### 6.2 手動 export
 

@@ -30,7 +30,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * 気圧・標高・歩数ウィジェット
@@ -41,7 +43,24 @@ class PressureWidgetReceiver : AppWidgetProvider() {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                ids.forEach { updateSingleWidget(context, manager, it, WidgetUpdateReason.HOST) }
+                ids.forEach { updateSingleWidget(context, manager, it, allowSignatureSkip = false) }
+            } finally {
+                pending.finish()
+            }
+        }
+    }
+
+    /** リサイズ時に新サイズでグラフを再描画 */
+    override fun onAppWidgetOptionsChanged(
+        context: Context,
+        appWidgetManager: AppWidgetManager,
+        appWidgetId: Int,
+        newOptions: android.os.Bundle
+    ) {
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                updateSingleWidget(context, appWidgetManager, appWidgetId, allowSignatureSkip = false)
             } finally {
                 pending.finish()
             }
@@ -50,22 +69,38 @@ class PressureWidgetReceiver : AppWidgetProvider() {
 
     companion object {
         private const val TAG = "PressureWidgetReceiver"
+        private val lastRenderSignatures = ConcurrentHashMap<Int, PressureWidgetRenderSignature>()
+
+        private data class PressureWidgetRenderSignature(
+            val widgetId: Int,
+            val widthPx: Int,
+            val heightPx: Int,
+            val lookbackMs: Long,
+            val latestTimestamp: Long,
+            val latestAltitudeM: Int?,
+            val latestPressureRawTenth: Int?,
+            val latestPressureQnhTenth: Int?,
+            val stepsToday: Int,
+            val rawEntryCount: Int,
+            val motionSampleCount: Int,
+            val transparency: Int
+        )
 
         fun updateAll(context: Context) {
-            updateAll(context, WidgetUpdateReason.SERVICE)
+            updateAllWidgets(context)
         }
 
         fun forceUpdateAll(context: Context) {
-            updateAll(context, WidgetUpdateReason.FORCED)
+            updateAllWidgets(context)
         }
 
-        private fun updateAll(context: Context, reason: WidgetUpdateReason) {
+        private fun updateAllWidgets(context: Context) {
             val mgr = AppWidgetManager.getInstance(context)
             val cn = ComponentName(context, PressureWidgetReceiver::class.java)
             val ids = mgr.getAppWidgetIds(cn)
             if (ids.isEmpty()) return
             CoroutineScope(Dispatchers.IO).launch {
-                ids.forEach { updateSingleWidget(context, mgr, it, reason) }
+                ids.forEach { updateSingleWidget(context, mgr, it, allowSignatureSkip = true) }
             }
         }
 
@@ -73,7 +108,7 @@ class PressureWidgetReceiver : AppWidgetProvider() {
             context: Context,
             manager: AppWidgetManager,
             widgetId: Int,
-            reason: WidgetUpdateReason
+            allowSignatureSkip: Boolean
         ) {
             try {
                 val settings = SettingsRepository(context)
@@ -82,37 +117,60 @@ class PressureWidgetReceiver : AppWidgetProvider() {
                     views,
                     PendingIntent.getActivity(
                         context,
-                        0,
+                        1002,
                         Intent(context, MainActivity::class.java).apply {
-                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            action = MainActivity.ACTION_OPEN_GRAPH
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                Intent.FLAG_ACTIVITY_SINGLE_TOP
+                            putExtra(MainActivity.EXTRA_OPEN_SCREEN, MainActivity.SCREEN_HOME)
+                            putExtra(MainActivity.EXTRA_RESET_GRAPH_WINDOW, true)
                         },
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                     )
                 )
-                if (!shouldRenderWidget(settings, reason)) {
-                    manager.partiallyUpdateAppWidget(widgetId, views)
-                    return
-                }
 
                 val db = AppDatabase.getInstance(context)
                 val lookbackMin = settings.lookbackMin.first()
                 val latest = db.logDao().getLatest()
                 val lookbackMs = lookbackMin * 60_000L
                 val windowEndMs = latest?.timestamp ?: System.currentTimeMillis()
-                val fetchStartMs = (windowEndMs - lookbackMs * 2).coerceAtLeast(0L)
-                val rawEntries = db.logDao().getEntriesBetween(fetchStartMs, windowEndMs).first().reversed()
-                val motionSamples = db.motionSampleDao().getBetween(fetchStartMs, windowEndMs).first().sortedBy { it.timestamp }
-                val transparency = settings.widgetTransparency.first()
-
-                val stepsToday = GraphUtil.calculateTodaySteps(rawEntries)
-                val latestMetrics = GraphUtil.resolveLatestMetricValues(rawEntries.sortedBy { it.timestamp }, latest)
-
                 val opts = manager.getAppWidgetOptions(widgetId)
                 val wDp = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 300)
                 val hDp = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 200)
                 val density = context.resources.displayMetrics.density
                 val wPx = (wDp * density).toInt().coerceAtLeast(200)
                 val hPx = (hDp * density).toInt().coerceAtLeast(130)
+                val windowStartMs = (windowEndMs - lookbackMs).coerceAtLeast(0L)
+                val fetchStartMs = GraphUtil.graphSourceStartMs(windowStartMs)
+                val rawEntries = db.logDao().getEntriesBetween(fetchStartMs, windowEndMs).first().reversed()
+                val motionSamples = db.motionSampleDao().getBetween(fetchStartMs, windowEndMs).first().sortedBy { it.timestamp }
+                val transparency = settings.widgetTransparency.first()
+
+                val stepsToday = GraphUtil.calculateTodaySteps(rawEntries)
+                val latestMetrics = GraphUtil.resolveLatestMetricValues(rawEntries.sortedBy { it.timestamp }, latest)
+                val signature = PressureWidgetRenderSignature(
+                    widgetId = widgetId,
+                    widthPx = wPx,
+                    heightPx = hPx,
+                    lookbackMs = lookbackMs,
+                    latestTimestamp = latest?.timestamp ?: -1L,
+                    latestAltitudeM = latestMetrics.altitude?.roundToInt(),
+                    latestPressureRawTenth = latestMetrics.pressureRaw?.let { (it * 10f).roundToInt() },
+                    latestPressureQnhTenth = latestMetrics.pressureQnh?.let { (it * 10f).roundToInt() },
+                    stepsToday = stepsToday,
+                    rawEntryCount = rawEntries.size,
+                    motionSampleCount = motionSamples.size,
+                    transparency = transparency
+                )
+                if (allowSignatureSkip && lastRenderSignatures[widgetId] == signature) {
+                    Log.d(
+                        TAG,
+                        "WIDGET_RENDER_SKIPPED: widgetId=$widgetId reason=signature_unchanged " +
+                            "latestTs=${signature.latestTimestamp} rawRows=${signature.rawEntryCount} motionRows=${signature.motionSampleCount}"
+                    )
+                    return
+                }
 
                 views.setInt(R.id.widget_pressure_image, "setBackgroundColor", Color.TRANSPARENT)
                 views.setImageViewBitmap(
@@ -120,7 +178,12 @@ class PressureWidgetReceiver : AppWidgetProvider() {
                     createGraphBitmap(rawEntries, motionSamples, latestMetrics, stepsToday, wPx, hPx, density, transparency, lookbackMs, windowEndMs)
                 )
                 manager.updateAppWidget(widgetId, views)
-                settings.setPressureWidgetLastRenderMs(System.currentTimeMillis())
+                lastRenderSignatures[widgetId] = signature
+                Log.d(
+                    TAG,
+                    "WIDGET_RENDERED: widgetId=$widgetId latestTs=${latest?.timestamp ?: -1} " +
+                        "rows=${rawEntries.size} lookbackMs=$lookbackMs windowEndMs=$windowEndMs fetchStartMs=$fetchStartMs"
+                )
             } catch (e: Throwable) {
                 Log.e(TAG, "Update Error", e)
             }
@@ -129,18 +192,6 @@ class PressureWidgetReceiver : AppWidgetProvider() {
         private fun bindOpenAppClick(views: RemoteViews, pendingIntent: PendingIntent) {
             views.setOnClickPendingIntent(R.id.widget_pressure_root, pendingIntent)
             views.setOnClickPendingIntent(R.id.widget_pressure_image, pendingIntent)
-        }
-
-        private suspend fun shouldRenderWidget(
-            settings: SettingsRepository,
-            reason: WidgetUpdateReason
-        ): Boolean {
-            return WidgetRenderGate.shouldRender(
-                tag = TAG,
-                reason = reason,
-                intervalSec = settings.pressureWidgetIntervalMin.first(),
-                lastRenderMs = settings.pressureWidgetLastRenderMs.first()
-            )
         }
 
         private fun createGraphBitmap(

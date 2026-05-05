@@ -100,11 +100,13 @@ def render_shell_html() -> str:
         <option value="latest-session">最新セッション</option>
         <option value="full">全体</option>
       </select>
+      <select id="dateSelect" title="日付"></select>
       <select id="correctionSelect" title="初期補正表示">
         <option value="corrected">アプリ補正あり</option>
         <option value="raw">補正なし</option>
       </select>
       <button id="openButton">CSVを開く</button>
+      <button id="openMotionButton">補助CSVを開く</button>
       <button id="reloadButton" class="primary">最新を再読込</button>
     </div>
   </div>
@@ -116,17 +118,35 @@ def render_shell_html() -> str:
     const frame = document.getElementById('dashboardFrame');
     const reloadButton = document.getElementById('reloadButton');
     const openButton = document.getElementById('openButton');
+    const openMotionButton = document.getElementById('openMotionButton');
     const viewSelect = document.getElementById('viewSelect');
+    const dateSelect = document.getElementById('dateSelect');
     const correctionSelect = document.getElementById('correctionSelect');
 
     function setBusy(isBusy, text) {
       reloadButton.disabled = isBusy;
       openButton.disabled = isBusy;
+      openMotionButton.disabled = isBusy;
       viewSelect.disabled = isBusy;
+      dateSelect.disabled = isBusy;
       correctionSelect.disabled = isBusy;
       if (text) {
         metaText.textContent = text;
       }
+    }
+
+    function renderDateOptions(dateKeys, selectedDateKey) {
+      dateSelect.innerHTML = '';
+      (dateKeys || []).forEach((dateKey) => {
+        const option = document.createElement('option');
+        option.value = dateKey;
+        option.textContent = dateKey;
+        if (dateKey === selectedDateKey) {
+          option.selected = true;
+        }
+        dateSelect.appendChild(option);
+      });
+      dateSelect.style.display = (dateKeys && dateKeys.length > 1) ? 'inline-block' : 'none';
     }
 
     function applyResult(result) {
@@ -134,7 +154,8 @@ def render_shell_html() -> str:
       frame.srcdoc = result.dashboard_html;
       viewSelect.value = result.view;
       correctionSelect.value = result.correction;
-      metaText.textContent = `${result.csv_name} | ${result.range_text}`;
+      renderDateOptions(result.date_keys || [], result.selected_date_key);
+      metaText.textContent = `${result.csv_name} | motion=${result.motion_csv_name} | ${result.range_text}`;
       document.title = `GpsPressureLogger Viewer - ${result.csv_name}`;
     }
 
@@ -163,16 +184,38 @@ def render_shell_html() -> str:
     }
 
     async function openCsv() {
-      setBusy(true, 'CSVを選択しています...');
+      setBusy(true, 'CSVを開いています...');
       try {
-        const result = await window.pywebview.api.open_csv(viewSelect.value, correctionSelect.value);
-        if (result) {
-          applyResult(result);
-        } else {
-          metaText.textContent = 'CSV選択はキャンセルされました。';
-        }
+        const result = await window.pywebview.api.open_csv_file();
+        if (result) applyResult(result);
       } catch (error) {
-        metaText.textContent = `CSV読込エラー: ${error}`;
+        metaText.textContent = `ファイルオープンエラー: ${error}`;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function openMotionCsv() {
+      setBusy(true, '補助CSVを開いています...');
+      try {
+        const result = await window.pywebview.api.open_motion_csv_file();
+        if (result) applyResult(result);
+      } catch (error) {
+        metaText.textContent = `ファイルオープンエラー: ${error}`;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function onDateChange() {
+      const dateKey = dateSelect.value;
+      if (!dateKey) return;
+      setBusy(true, '日付変更中...');
+      try {
+        const result = await window.pywebview.api.set_date(dateKey, viewSelect.value, correctionSelect.value);
+        applyResult(result);
+      } catch (error) {
+        metaText.textContent = `日付変更エラー: ${error}`;
       } finally {
         setBusy(false);
       }
@@ -180,8 +223,9 @@ def render_shell_html() -> str:
 
     reloadButton.addEventListener('click', reloadLatest);
     openButton.addEventListener('click', openCsv);
-    viewSelect.addEventListener('change', reloadLatest);
-    correctionSelect.addEventListener('change', reloadLatest);
+    openMotionButton.addEventListener('click', openMotionCsv);
+    dateSelect.addEventListener('change', onDateChange);
+
     window.addEventListener('pywebviewready', loadInitialState);
   </script>
 </body>

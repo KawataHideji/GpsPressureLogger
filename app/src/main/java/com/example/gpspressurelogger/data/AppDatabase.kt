@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [LogEntry::class, MotionSample::class],
-    version = 9,
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -138,6 +138,29 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN kAccelSource TEXT")
+            }
+        }
+
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN kScalarAvg REAL")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN kDirectionalityRatio REAL")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN kMaxMagnitude REAL")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN trKStatus TEXT")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN trKRawStatus TEXT")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN trKAvg REAL")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN trKScalarAvg REAL")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN trKDirectionalityRatio REAL")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN trKMaxMagnitude REAL")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN trKHorizontalMaxMagnitude REAL")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN trKConfidence REAL")
+                db.execSQL("ALTER TABLE motion_samples ADD COLUMN trKAccelSource TEXT")
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -148,7 +171,15 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "gps_pressure_logger.db"
                 )
-                .addMigrations(MIGRATION_4_6, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                .addMigrations(
+                    MIGRATION_4_6,
+                    MIGRATION_5_6,
+                    MIGRATION_6_7,
+                    MIGRATION_7_8,
+                    MIGRATION_8_9,
+                    MIGRATION_9_10,
+                    MIGRATION_10_11
+                )
                 .build().also { INSTANCE = it }
             }
     }

@@ -10,7 +10,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.content.res.Resources
@@ -40,6 +42,8 @@ fun MapScreen(
     val dateFormatter = remember { SimpleDateFormat("yyyy年M月d日", Locale.JAPAN) }
     var lastAutoFitTarget by remember { mutableLongStateOf(Long.MIN_VALUE) }
     var lastEmptyResetTarget by remember { mutableLongStateOf(Long.MIN_VALUE) }
+    var showStateLabels by remember { mutableStateOf(false) }
+    var showTrkLabels by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -52,14 +56,61 @@ fun MapScreen(
                 )
                 Surface(color = MaterialTheme.colorScheme.surfaceVariant, shadowElevation = 4.dp) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        IconButton(onClick = { viewModel.moveToPrevDay() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "前日") }
-                        Text(text = dateFormatter.format(Date(targetDateStart)), style = MaterialTheme.typography.titleMedium)
+                        IconButton(onClick = { viewModel.moveToPrevDay() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "前日")
+                        }
+                        Text(
+                            text = dateFormatter.format(Date(targetDateStart)),
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.weight(1f),
+                            textAlign = TextAlign.Center
+                        )
                         val isToday = targetDateStart >= GpsUtil.getLoggingStart(System.currentTimeMillis())
-                        IconButton(onClick = { viewModel.moveToNextDay() }, enabled = !isToday) { Icon(Icons.AutoMirrored.Filled.ArrowForward, "翌日") }
+                        IconButton(onClick = { viewModel.moveToNextDay() }, enabled = !isToday) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, "翌日")
+                        }
+                        // 状態ラベル表示トグル
+                        TextButton(
+                            onClick = { showStateLabels = !showStateLabels },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = if (showStateLabels)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        ) {
+                            Text(
+                                text = "K/W",
+                                fontSize = 13.sp,
+                                fontWeight = if (showStateLabels)
+                                    androidx.compose.ui.text.font.FontWeight.Bold
+                                else
+                                    androidx.compose.ui.text.font.FontWeight.Normal
+                            )
+                        }
+                        TextButton(
+                            onClick = { showTrkLabels = !showTrkLabels },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = if (showTrkLabels)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        ) {
+                            Text(
+                                text = "trK",
+                                fontSize = 13.sp,
+                                fontWeight = if (showTrkLabels)
+                                    androidx.compose.ui.text.font.FontWeight.Bold
+                                else
+                                    androidx.compose.ui.text.font.FontWeight.Normal
+                            )
+                        }
                     }
                 }
             }
@@ -91,88 +142,33 @@ fun MapScreen(
 
                 if (entriesReadyForTarget) {
                     val displayEntries = entries
-                    val polylineTrack = GpsUtil.buildDisplayPolyline(displayEntries, motionSamples)
-                    val stopMarkers = GpsUtil.clusterStops(displayEntries)
-                    val polylineSegments = GpsUtil.splitTrackByMode(polylineTrack)
-                    val directionMarkers = GpsUtil.computeDirectionArrowMarkers(polylineTrack)
-                    
-                    // 1. 軌跡の描画（viewer と同じ mode 色 + 進行方向マーカー）
-                    polylineSegments.forEach { segment ->
-                        drawPolyline(mapView, segment)
-                    }
-                    directionMarkers.forEach { arrow ->
-                        mapView.overlays.add(Marker(mapView).apply {
-                            position = GeoPoint(arrow.lat, arrow.lon)
-                            icon = createDirectionArrowDrawable(
-                                resources = mapView.context.resources,
-                                color = GpsUtil.modeColor(arrow.displayMode),
-                                angleDeg = arrow.angleDeg,
-                                surface = GpsUtil.MarkerSurface.APP_MAP
-                            )
-                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                            setInfoWindow(null)
-                        })
-                    }
-
-                    // 2. 滞在マーカー
-                    stopMarkers.filter { it.isStop }.forEach { pt ->
-                        mapView.overlays.add(Marker(mapView).apply {
-                            position = GeoPoint(pt.lat, pt.lon)
-                            icon = createCircleDrawable(
-                                resources = mapView.context.resources,
-                                color = 0xAA888888.toInt(),
-                                style = GpsUtil.stopMarkerStyle(pt.stopCount, GpsUtil.MarkerSurface.APP_MAP),
-                                isHollow = false
-                            )
-                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                            title = "滞在点 (${pt.stopCount}点)"
-                        })
-                    }
-
-                    // 3. 特殊マーカー：開始点（赤〇中抜き）と現在点（青〇）を最前面へ
-                    if (displayEntries.isNotEmpty()) {
-                        // 開始点 (3時基準の最初のデータ)
-                        val start = displayEntries.first()
-                        mapView.overlays.add(Marker(mapView).apply {
-                            position = GeoPoint(start.latitude ?: return@apply, start.longitude ?: return@apply)
-                            icon = createCircleDrawable(
-                                resources = mapView.context.resources,
-                                color = android.graphics.Color.RED,
-                                style = GpsUtil.startMarkerStyle(GpsUtil.MarkerSurface.APP_MAP),
-                                isHollow = true
-                            )
-                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                            setInfoWindow(null) // タップしても窓を出さない
-                        })
-
-                        // 現在地 (最新のデータ)
-                        val latest = displayEntries.last()
-                        mapView.overlays.add(Marker(mapView).apply {
-                            position = GeoPoint(latest.latitude ?: return@apply, latest.longitude ?: return@apply)
-                            icon = createCircleDrawable(
-                                resources = mapView.context.resources,
-                                color = android.graphics.Color.BLUE,
-                                style = GpsUtil.currentMarkerStyle(GpsUtil.MarkerSurface.APP_MAP),
-                                isHollow = true
-                            )
-                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                            setInfoWindow(null)
-                        })
-                    }
 
                     if (lastAutoFitTarget != targetDateStart) {
                         lastAutoFitTarget = targetDateStart
                         lastEmptyResetTarget = targetDateStart
                         GpsUtil.calculateBounds(displayEntries)?.let { bounds ->
+                            val capturedShowLabels = showStateLabels
+                            val capturedShowTrkLabels = showTrkLabels
                             mapView.post {
+                                mapView.overlays.clear()
                                 mapView.zoomToBoundingBox(
                                     BoundingBox(bounds.maxLat, bounds.maxLon, bounds.minLat, bounds.minLon),
                                     false,
                                     100
                                 )
                                 if (mapView.zoomLevelDouble > 16.0) mapView.controller.setZoom(16.0)
+                                renderMapOverlays(
+                                    mapView,
+                                    displayEntries,
+                                    motionSamples,
+                                    capturedShowLabels,
+                                    capturedShowTrkLabels
+                                )
+                                mapView.invalidate()
                             }
-                        }
+                        } ?: renderMapOverlays(mapView, displayEntries, motionSamples, showStateLabels, showTrkLabels)
+                    } else {
+                        renderMapOverlays(mapView, displayEntries, motionSamples, showStateLabels, showTrkLabels)
                     }
                 }
                 mapView.invalidate()
@@ -188,10 +184,102 @@ private fun entriesMatchTargetDay(entries: List<LogEntry>, targetDateStart: Long
         entries.last().timestamp in targetDateStart until targetDateEnd
 }
 
+private fun renderMapOverlays(
+    mapView: MapView,
+    displayEntries: List<LogEntry>,
+    motionSamples: List<com.example.gpspressurelogger.data.MotionSample>,
+    showStateLabels: Boolean = false,
+    showTrkLabels: Boolean = false
+) {
+    val polylineTrack = GpsUtil.buildDisplayPolyline(displayEntries, motionSamples)
+    val stopMarkers = GpsUtil.clusterStops(displayEntries)
+    val polylineSegments = GpsUtil.splitTrackByMode(polylineTrack)
+    val density = mapView.context.resources.displayMetrics.density
+    val directionMarkers = GpsUtil.computeDirectionArrowMarkersOnScreen(
+        track = polylineTrack,
+        projectToScreen = { point ->
+            val pixel = mapView.projection.toPixels(GeoPoint(point.lat, point.lon), null)
+            pixel.x.toFloat() to pixel.y.toFloat()
+        },
+        params = GpsUtil.appDirectionArrowParams(density)
+    )
+
+    // 軌跡は地図の auto-fit / zoom が終わった後に overlay として追加する。
+    polylineSegments.forEach { segment ->
+        drawPolyline(mapView, segment)
+    }
+    directionMarkers.forEach { arrow ->
+        mapView.overlays.add(Marker(mapView).apply {
+            position = GeoPoint(arrow.lat, arrow.lon)
+            icon = createDirectionArrowDrawable(
+                resources = mapView.context.resources,
+                color = GpsUtil.modeColor(arrow.displayMode),
+                angleDeg = arrow.angleDeg,
+                surface = GpsUtil.MarkerSurface.APP_MAP
+            )
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            setInfoWindow(null)
+        })
+    }
+
+    stopMarkers.filter { it.isStop }.forEach { pt ->
+        mapView.overlays.add(Marker(mapView).apply {
+            position = GeoPoint(pt.lat, pt.lon)
+            icon = createCircleDrawable(
+                resources = mapView.context.resources,
+                color = 0xAA888888.toInt(),
+                style = GpsUtil.stopMarkerStyle(pt.stopCount, GpsUtil.MarkerSurface.APP_MAP),
+                isHollow = false
+            )
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            title = "滞在点 (${pt.stopCount}点)"
+        })
+    }
+
+    if (displayEntries.isNotEmpty()) {
+        val start = displayEntries.first()
+        mapView.overlays.add(Marker(mapView).apply {
+            position = GeoPoint(start.latitude ?: return@apply, start.longitude ?: return@apply)
+            icon = createCircleDrawable(
+                resources = mapView.context.resources,
+                color = android.graphics.Color.RED,
+                style = GpsUtil.startMarkerStyle(GpsUtil.MarkerSurface.APP_MAP),
+                isHollow = true
+            )
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            setInfoWindow(null)
+        })
+
+        val latest = displayEntries.last()
+        mapView.overlays.add(Marker(mapView).apply {
+            position = GeoPoint(latest.latitude ?: return@apply, latest.longitude ?: return@apply)
+            icon = createCircleDrawable(
+                resources = mapView.context.resources,
+                color = android.graphics.Color.BLUE,
+                style = GpsUtil.currentMarkerStyle(GpsUtil.MarkerSurface.APP_MAP),
+                isHollow = true
+            )
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            setInfoWindow(null)
+        })
+    }
+
+    // 状態ラベル：stK / W / 定速領域の変化点を地図上に表示する
+    if (showStateLabels) {
+        renderStateLabels(mapView, displayEntries, motionSamples)
+    }
+    if (showTrkLabels) {
+        renderTrkLabels(mapView, displayEntries, motionSamples)
+    }
+}
+
 private fun drawPolyline(mapView: MapView, segment: GpsUtil.TrackSegment) {
     val polyline = Polyline(mapView).apply {
         outlinePaint.color = GpsUtil.modeColor(segment.displayMode)
-        outlinePaint.strokeWidth = 10f
+        outlinePaint.strokeWidth = GpsUtil.mapTrackStrokeWidthPx(
+            GpsUtil.MarkerSurface.APP_MAP,
+            mapView.context.resources.displayMetrics.density
+        )
         setPoints(segment.points.map { GeoPoint(it.lat, it.lon) })
     }
     mapView.overlays.add(polyline)
@@ -219,6 +307,100 @@ private fun createCircleDrawable(
         paint.style = android.graphics.Paint.Style.FILL
         canvas.drawCircle(size / 2f, size / 2f, style.innerRadiusPx, paint)
     }
+    return android.graphics.drawable.BitmapDrawable(resources, bmp)
+}
+
+/**
+ * stK / W / 定速領域の状態遷移点を小さなラベルバッジとして地図上に追加する。
+ */
+private fun renderStateLabels(
+    mapView: MapView,
+    displayEntries: List<LogEntry>,
+    motionSamples: List<MotionSample>
+) {
+    val labels = GpsUtil.buildStateLabels(displayEntries, motionSamples)
+    labels.forEach { label ->
+        mapView.overlays.add(Marker(mapView).apply {
+            position = GeoPoint(label.lat, label.lon)
+            icon = createStateLabelDrawable(
+                resources = mapView.context.resources,
+                text = label.text,
+                bgColor = label.bgColor
+            )
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            setInfoWindow(null)
+        })
+    }
+}
+
+private fun renderTrkLabels(
+    mapView: MapView,
+    displayEntries: List<LogEntry>,
+    motionSamples: List<MotionSample>
+) {
+    val labels = GpsUtil.buildTrkLabels(displayEntries, motionSamples)
+    labels.forEach { label ->
+        mapView.overlays.add(Marker(mapView).apply {
+            position = GeoPoint(label.lat, label.lon)
+            icon = createStateLabelDrawable(
+                resources = mapView.context.resources,
+                text = label.text,
+                bgColor = label.bgColor
+            )
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            setInfoWindow(null)
+        })
+    }
+}
+
+/**
+ * 角丸四角形に白テキストを描いた、状態ラベル用の小さなバッジ Drawable を生成する。
+ */
+private fun createStateLabelDrawable(
+    resources: Resources,
+    text: String,
+    bgColor: Int
+): android.graphics.drawable.Drawable {
+    val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 26f
+        color = android.graphics.Color.WHITE
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+        textAlign = android.graphics.Paint.Align.CENTER
+    }
+    val padH = 11f
+    val padV = 6f
+    val textWidth = textPaint.measureText(text)
+    val textHeight = textPaint.descent() - textPaint.ascent()
+    val width = (textWidth + padH * 2).toInt().coerceAtLeast(44)
+    val height = (textHeight + padV * 2).toInt().coerceAtLeast(30)
+
+    val bmp = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bmp)
+
+    // 影（視認性向上）
+    val shadowPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x55000000
+        style = android.graphics.Paint.Style.FILL
+    }
+    canvas.drawRoundRect(
+        android.graphics.RectF(2f, 2f, width.toFloat(), height.toFloat()),
+        9f, 9f, shadowPaint
+    )
+
+    // バッジ背景
+    val bgPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = bgColor
+        style = android.graphics.Paint.Style.FILL
+    }
+    canvas.drawRoundRect(
+        android.graphics.RectF(0f, 0f, (width - 2).toFloat(), (height - 2).toFloat()),
+        8f, 8f, bgPaint
+    )
+
+    // テキスト
+    val baseline = (height - 2) / 2f - (textPaint.descent() + textPaint.ascent()) / 2f
+    canvas.drawText(text, (width - 2) / 2f, baseline, textPaint)
+
     return android.graphics.drawable.BitmapDrawable(resources, bmp)
 }
 

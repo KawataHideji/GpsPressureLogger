@@ -1,6 +1,6 @@
 # データ形式仕様書
 
-最終更新: 2026-04-16
+最終更新: 2026-04-24
 
 ## 1. 目的
 
@@ -22,6 +22,7 @@
 - 主記録は 3 秒スロットごとに欠損列を含む 1 レコードを持てる
 - 交換 CSV は不定間隔レコードも許容する
 - 地図の線色、進行方向マーカー、歩数グラフ色、補正気圧系列色、停止標準化や動的 GPS 取得間隔などの表示・取得制御変更は、本仕様で定義する CSV / Room データ形式を変更しない
+- SAF export では、出力先 URI を開けない場合や書き込み例外が出た場合を失敗として扱い、0 byte ファイルを正しいバックアップとは見なさない
 
 ## 2. 標準交換形式
 
@@ -49,23 +50,29 @@ Timestamp,Lat,Lon,Alt,PresRaw,PresQnh,StepsDelta,GpsAccuracy
 ヘッダ:
 
 ```csv
-Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAvg,KVariance,KConfidence,WStatus,StepDeltaWindow,GpsIntervalMs,GpsImmediate,ConfirmedMode,ConstantRegionKind,ConstantRegionSpeedKmh,ConstantRegionStartLat,ConstantRegionStartLon,ConstantRegionEndLat,ConstantRegionEndLon,ConstantRegionStayLat,ConstantRegionStayLon,ConstantRegionDirectionDeg
+Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAvg,KScalarAvg,KDirectionalityRatio,KVariance,TrKStatus,TrKRawStatus,TrKAvg,TrKDirectionalityRatio,WStatus,StepDeltaWindow,GpsIntervalMs,GpsImmediate,ConfirmedMode,ConstantRegionKind,ConstantRegionSpeedKmh,ConstantRegionStartLat,ConstantRegionStartLon,ConstantRegionEndLat,ConstantRegionEndLon,ConstantRegionStayLat,ConstantRegionStayLon,ConstantRegionDirectionDeg
 ```
 
-`AccelStddev3s` / `AccelMad3s` は旧方式互換列であり、新方式では空欄を許容する。新方式の正式な加速度判定値は `KAvg` / `KVariance` / `KStatus` とする。
+`AccelStddev3s` / `AccelMad3s` は旧方式互換列であり、新方式では空欄を許容する。新方式の正式な加速度状態は `stK` と呼ぶ。CSV / Room では既存互換のため列名 `KStatus` / `KRawStatus` / `KAvg` / `KVariance` を維持し、値は新方式では `STK1 / STK2 / STK4` を保存する。旧値 `K1 / K2_K3 / K4` は import / 表示再構成時に互換解釈する。外部バックアップ CSV は、現行判定で使う項目だけを出力する。加えて、`trK` の現在値を `TrK*` 列として 3 秒ごとに保存する。
 
 追加列:
 
-- `KStatus`: ヒステリシス適用後の `K1 / K2_K3 / K4`
-- `KRawStatus`: ヒステリシス適用前の瞬間判定
-- `KAvg`: k-status 解析窓内の合成加速度平均
-- `KVariance`: k-status 解析窓内の合成加速度分散
-- `KConfidence`: k-status 判定の参考信頼度
+- `KStatus`: 互換列名。新方式では 3 秒スロット加速度状態 `stK` を保存し、値は `STK1 / STK2 / STK4` とする
+- `KRawStatus`: 互換列名。新方式では `stK` の raw 判定を保存する。現行の `stK` は 3 秒スロット単位判定のため通常 `KStatus` と同じ値になる
+- `KAvg`: 3 秒スロット全体の 3 軸線形加速度を、可能なら世界座標（East / North / Up）へ変換したうえで軸ごとに平均し、その平均ベクトルのノルムを取った値。振動ではなく、スロット全体として方向性が残る加速・減速・旋回を捉えるために使う
+- `KScalarAvg`: 3 秒スロット全体の各サンプル加速度ノルム `|a_i|` の平均。動きの総量を表す
+- `KVariance`: 3 秒スロット全体の変換済み合成加速度ノルムの分散。平均加速ではなく、振動・揺れの大きさを捉えるために使う
+- `TrKStatus` / `TrKRawStatus`: 1 秒窓 `trK` の確定値 / raw 候補値。値は `ON / OFF`
+- `KAvg`: 3 秒窓の平均水平加速度ベクトルの大きさ `k`
+- `KDirectionalityRatio`: 3 秒窓の射影標準偏差比 `sigma / k`
+- `TrKAvg`: 直近 1 秒窓の平均水平加速度ベクトルの大きさ `k`
+- `TrKDirectionalityRatio`: 直近 1 秒窓の射影標準偏差比 `sigma / k`
 - `WStatus`: `W1 / W2`
-- `StepDeltaWindow`: w-status 判定窓内の歩数増分合計
+- `StepDeltaWindow`: `wWindowMs` 内の歩行イベント数 / 歩数増分合計。`WStatus=W1` は `StepDeltaWindow >= wStepDeltaThreshold` かつ最終歩行イベントから `walkingThresholdMs` 以内で判定する
 - `GpsIntervalMs`: 新状態管理が決めた GPS 要求間隔
-- `GpsImmediate`: 即時 GPS 取得要求なら `1`、それ以外は `0`
-- `ConfirmedMode`: アプリ表示用の `DEVICE_STILL / STOPPED / WALKING / VEHICLE / UNKNOWN`
+- `GpsImmediate`: 直前の 3 秒スロット内で `trK` ON 遷移による即時 GPS 取得要求が発生した場合、または `stK4` へ新規遷移した場合は `1`、それ以外は `0`
+- `# EVENT GPS_BURST_*`: コメント行として出力される加速度トリガー時 GPS burst 要求の診断ログ。`START`、`CANDIDATE`、`ACCEPT`、`REJECT`、`STOP`、`SKIPPED_COOLDOWN`、`UNAVAILABLE`、`SECURITY_ERROR` を使い、CSV の通常データ列形式は変更しない
+- `ConfirmedMode`: 確定キャッシュとして保存するアプリ表示用の `DEVICE_STILL / STOPPED / WALKING / VEHICLE / UNKNOWN`。現在まで継続中の未確定領域では空欄を許容する。
 - `ConstantRegionKind`: 定速領域終了時の `NONE / STAY / CONSTANT_MOVE`
 - `ConstantRegionSpeedKmh`: 定速領域の直線近似から求めた平均速度
 - `ConstantRegionStartLat` / `ConstantRegionStartLon`: 定速領域の直線近似 `g(t_s)` による始点座標
@@ -73,9 +80,13 @@ Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAv
 - `ConstantRegionStayLat` / `ConstantRegionStayLon`: `STAY` 時の stay point 座標。原則として `(g(t_s)+g(t_e))/2` を使う
 - `ConstantRegionDirectionDeg`: `CONSTANT_MOVE` 時の移動方向
 
-`ConstantRegionKind=STAY` は最終表示状態ではなく、定速領域解析の中間判定とする。表示色・状態名・後続の再構成では `ConfirmedMode` を正式な状態として使う。たとえば `STAY + K1 + W2` は `ConfirmedMode=DEVICE_STILL`、`STAY + K2_K3 + W2` は `ConfirmedMode=STOPPED` として保存する。
+`ConstantRegionKind=STAY` は最終表示状態ではなく、定速領域解析の中間判定とする。表示色・状態名・後続の再構成では `ConfirmedMode` を正式な状態として使う。たとえば閉じた `STAY + STK1 + W2` は `ConfirmedMode=DEVICE_STILL`、閉じた `STAY + STK2 + W2` は `ConfirmedMode=STOPPED` として保存する。
 
-定速領域継続中も `ConstantRegionKind` は暫定値として更新される。区間が閉じるまで判定は変化しうるため、表示側は毎回この暫定値で描き替える。`STAY` の間は地図上で stay point 1 点へ集約し、`CONSTANT_MOVE` の間は通常の連続点として扱う。
+`ConfirmedMode=WALKING` は保存時点の確定キャッシュだが、表示再構成では `ConstantRegionSpeedKmh` と表示対象の GPS 点列から再評価する。GPS速度または `ConstantRegionSpeedKmh` が `walkingVehicleSpeedThresholdKmh` 以上、または歩数推定速度との差が `walkingGpsStepMismatchThresholdKmh` 以上なら、表示色は `VEHICLE` として扱う。CSV / Room の列は増やさず、既存列の解釈だけで行う。
+
+定速領域継続中も `ConstantRegionKind` は暫定値として更新される。区間が閉じるまで判定は変化しうるため、`ConfirmedMode` は空欄のままにする。表示側は最後に `ConfirmedMode` が入っている行を確定ポイントとし、確定ポイント以後の行だけ、この暫定値で描き替える。`STAY` の間は地図上で stay point 1 点へ集約し、`CONSTANT_MOVE` の間は記録された GPS 点列をそのまま扱う。
+
+定速領域が閉じて `STAY / CONSTANT_MOVE` が確定した場合、アプリは当該区間の既存 `MotionSample` を確定結果でバックフィルする。標準列は増やさず、同じ `Timestamp` の `ConfirmedMode`、`ConstantRegionKind`、`ConstantRegionSpeedKmh`、`ConstantRegionStart*`、`ConstantRegionEnd*`、`ConstantRegionStay*`、`ConstantRegionDirectionDeg` を置き換える。これにより、`ConfirmedMode` は「ここまでは後から変わらない」確定キャッシュとして扱える。
 
 import は、旧ヘッダ `Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s` と、`ConstantRegionSpeedKmh` までの旧拡張ヘッダも受け入れる。旧 CSV では存在しない新方式列は `null` として扱う。
 
@@ -85,7 +96,8 @@ import は、旧ヘッダ `Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRa
 
 - 3 秒ごとに 1 レコードを記録する
 - 標準交換形式の記録 CSV とは混在させない
-- 判定用の基礎指標に加えて、新方式の `k-status / w-status / 確定モード / GPS 取得判断` を保持する
+- 判定用の基礎指標に加えて、新方式の `stK / trK / w-status / 確定モード / GPS 取得判断` を保持する。`trK` は表示モードへ直接は使わないが、閾値解析のため現在窓の値を 3 秒ごとに保存する
+- 加速度座標変換の source（RotationVector / accel+mag / device / norm fallback）は `KAccelSource` として CSV / Room に保存する。デバッグログの `accelSource` も実機調査用に維持する
 - 欠損値は空欄で表現する
 - これらの値は `完全停止 / 停止 / 徒歩 / 高速移動` のモード判定に利用する
 
@@ -169,19 +181,20 @@ import は、旧ヘッダ `Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRa
 アプリ内部の主記録方針:
 
 - 3 秒ごとに 1 スロットを持つ
-- そのスロットでは GPS、高度、気圧、歩数増分の欠損を許容する
+- そのスロットでは GPS、標高、気圧、歩数増分の欠損を許容する
 - GPS 集約では、直前に採用済みの GPS を `before` として参照してよい
 - 移動中（徒歩 / 高速移動）:
   - スロット内 GPS プール 0 件: 欠損
   - スロット内 GPS プール 1 件: その値を採用
-  - スロット内 GPS プール 2 件以上: `before` とプール内 GPS 群から 3 次スプライン補間を作り、スロット時刻の `Lat / Lon / Alt` を採用
+  - スロット内 GPS プール 2 件以上: `before` とプール内 GPS 群から 3 次スプライン補間を作り、スロット時刻の `Lat / Lon` を採用
 - 完全停止かつ直前スロットも完全停止:
   - スロット内 GPS プール 0 件: 欠損
-  - スロット内 GPS プール 1 件以上: `before` を含めた平均の `Lat / Lon / Alt` を採用
+  - スロット内 GPS プール 1 件以上: `before` を含めた平均の `Lat / Lon` を採用
 - 完全停止かつ直前スロットが完全停止ではない:
   - スロット内 GPS プール 0 件: 欠損
-  - スロット内 GPS プール 1 件以上: `before` を含めない平均の `Lat / Lon / Alt` を採用
+  - スロット内 GPS プール 1 件以上: `before` を含めない平均の `Lat / Lon` を採用
 - 停止 `STOPPED` は、完全停止寄りの平均化ルールを使う
+- `Alt` は GPS 座標の平均・スプライン補間には含めず、標高取得関数が保持する直近の有効 GPS 標高を採用する
 - 気圧はスロット時点の最新保持値を採用し、未初期化時のみ欠損とする
 - 歩数は 3 秒区間の増分を採用し、初期基準未確定時は `0` としてよい
 

@@ -1,5 +1,6 @@
 package com.example.gpspressurelogger.ui.navigation
 
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -18,14 +19,28 @@ sealed class Screen(val route: String) {
  * @param startDestination ウィジェットからのディープリンク等で起動時の画面を指定できる
  */
 @Composable
-fun AppNavGraph(startDestination: String = Screen.Home.route) {
+fun AppNavGraph(
+    startDestination: String = Screen.Home.route,
+    requestedRoute: String = startDestination,
+    requestId: Long = 0L,
+    graphResetRequestId: Long = 0L
+) {
     val navController = rememberNavController()
+
+    LaunchedEffect(requestId) {
+        if (requestId <= 1L) return@LaunchedEffect
+        navController.navigate(requestedRoute) {
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
 
     NavHost(navController = navController, startDestination = startDestination) {
         composable(Screen.Home.route) {
             HomeScreen(
                 onNavigateToMap      = { navController.navigate(Screen.Map.route) },
-                onNavigateToSettings = { navController.navigate(Screen.Settings.route) }
+                onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
+                graphResetRequestId = graphResetRequestId
             )
         }
         composable(Screen.Map.route) {

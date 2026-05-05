@@ -17,11 +17,15 @@ DEFAULT_BACKUP_GLOB = "gps_pressure_full_backup_*.csv"
 DEFAULT_CONVERTED_GLOB = "gps_pressure_full_backup_converted*.csv"
 DEFAULT_ANDROID_DIR = Path(r"C:\MyDrive\android")
 DEFAULT_CONVERTER_DIR = PROJECT_DIR / "log_converter"
+MOTION_BACKUP_PREFIX = "gps_pressure_motion_metrics_backup_"
+MOTION_BACKUP_PREFIX_LEGACY = "gps_pressure_motion_metrics_"
+MOTION_DAILY_PREFIX = "motion_metrics_"
 EVENT_PATTERN = re.compile(r"^# EVENT\s+(\d+)\s+(.*)$")
 MODE_CONFIRMED_PATTERN = re.compile(r"^MODE_CONFIRMED:\s+([A-Z_]+)\s+->\s+([A-Z_]+)")
 DEFAULT_SESSION_GAP_MINUTES = 20
-GRAPH_INTERVAL_MS = 30_000
+GRAPH_INTERVAL_MS = 60_000
 MAX_REASONABLE_SPEED_KMH = 300.0
+MAX_REASONABLE_ACCURACY_M = 100.0
 SINGLE_POINT_SPIKE_MAX_DURATION_MS = 5 * 60_000
 SINGLE_POINT_SPIKE_NEIGHBOR_DISTANCE_M = 80.0
 SINGLE_POINT_SPIKE_DETOUR_DISTANCE_M = 150.0
@@ -39,9 +43,27 @@ ISOLATED_CLUSTER_MAX_DURATION_MS = 4 * 60_000
 ISOLATED_CLUSTER_MAX_POINTS = 24
 PRESSURE_OUTLIER_THRESHOLD = 10.0
 ALTITUDE_OUTLIER_THRESHOLD = 300.0
+VALID_MODES = {"DEVICE_STILL", "STOPPED", "WALKING", "VEHICLE", "UNKNOWN"}
+STATE_LABEL_COLOR_STK1 = "#555566"
+STATE_LABEL_COLOR_STK2 = "#BB6600"
+STATE_LABEL_COLOR_STK4 = "#CC2200"
+STATE_LABEL_COLOR_W1 = "#1E66E8"
+STATE_LABEL_COLOR_W2 = "#7799BB"
+STATE_LABEL_COLOR_STAY = "#1E9944"
+STATE_LABEL_COLOR_CMOVE = "#8822CC"
+STATE_LABEL_COLOR_TRK_ON = "#D84315"
+STATE_LABEL_COLOR_TRK_OFF = "#607D8B"
+
+
+def normalize_mode(value):
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    return text if text in VALID_MODES else None
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize a standard backup CSV.")
     parser.add_argument("--csv-path", default=None)
+    parser.add_argument("--motion-csv-path", default=None)
     parser.add_argument("--html-output", default=DEFAULT_HTML)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--summary-only", action="store_true")
@@ -118,6 +140,15 @@ def get_header_value(values, index_by_name, aliases):
     return ""
 
 
+def get_header_bool(values, index_by_name, aliases):
+    value = get_header_value(values, index_by_name, aliases).strip().lower()
+    if value in ("1", "true", "yes", "y"):
+        return True
+    if value in ("0", "false", "no", "n"):
+        return False
+    return None
+
+
 def timestamp_to_jst_text(timestamp_ms: int) -> str:
     return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -167,6 +198,7 @@ def load_backup(csv_path: Path):
                 "Alt": to_float(get_header_value(values, index_by_name, ["Alt", "Elevation(m)"])),
                 "PresRaw": to_float(get_header_value(values, index_by_name, ["PresRaw", "Pa"])),
                 "PresQnh": to_float(get_header_value(values, index_by_name, ["PresQnh", "MSLP(Pa)"])),
+                "GpsAccuracy": to_float(get_header_value(values, index_by_name, ["GpsAccuracy", "Accuracy", "Accuracy(m)"])),
                 "StepsDelta": 0,
             }
             if row["PresRaw"] is not None and row["PresRaw"] > 2000:
@@ -188,7 +220,6 @@ def load_backup(csv_path: Path):
 
     rows.sort(key=lambda row: row["Timestamp"])
     previous_raw_steps = None
-    cumulative = 0
     for row in rows:
         raw_steps = row.pop("_RawSteps", None) if "_RawSteps" in row else None
         if raw_steps is not None:
@@ -197,8 +228,7 @@ def load_backup(csv_path: Path):
             else:
                 row["StepsDelta"] = max(0, raw_steps - previous_raw_steps)
             previous_raw_steps = raw_steps
-        cumulative += row["StepsDelta"]
-        row["StepsCumulative"] = cumulative
+    recompute_steps_cumulative(rows)
 
     return rows, events
 
@@ -207,33 +237,322 @@ def clone_rows(rows):
     return [dict(row) for row in rows]
 
 
-def assign_display_modes(rows, events):
-    # Viewer には MotionSample が直接入らないので、Android の表示系列で使う
-    # 「確定モードのタイムライン」を MODE_CONFIRMED イベントから再構成する。
-    transitions = []
-    for event in events:
-        match = MODE_CONFIRMED_PATTERN.match(event["message"])
-        if not match:
-            continue
-        transitions.append({
-            "timestamp": event["timestamp"],
-            "mode": match.group(2),
-        })
+def resolve_motion_csv_path(csv_path: Path, motion_csv_path_arg: str | None = None) -> Path | None:
+    if motion_csv_path_arg:
+        candidate = Path(motion_csv_path_arg)
+        return candidate if candidate.exists() else candidate
+    parent = csv_path.parent
+    stem = csv_path.stem
+    candidates = []
+    search_dirs = [parent, parent / "metrics"]
 
-    transitions.sort(key=lambda item: item["timestamp"])
-    current_mode = None
-    transition_index = 0
+    backup_match = re.match(r"gps_pressure_full_backup_(\d{8}_\d{6})$", stem)
+    if backup_match:
+        for search_dir in search_dirs:
+            candidates.append(search_dir / f"{MOTION_BACKUP_PREFIX}{backup_match.group(1)}.csv")
+            candidates.append(search_dir / f"{MOTION_BACKUP_PREFIX_LEGACY}{backup_match.group(1)}.csv")
+
+    daily_match = re.match(r"(?:gps_log|gps_pressure)_(\d{8})$", stem)
+    if daily_match:
+        candidates.extend(search_dir / f"{MOTION_DAILY_PREFIX}{daily_match.group(1)}.csv" for search_dir in search_dirs)
+
+    date_match = re.search(r"(\d{8})", stem)
+    if date_match:
+        date_text = date_match.group(1)
+        for search_dir in search_dirs:
+            if search_dir.exists():
+                candidates.extend(sorted(search_dir.glob(f"{MOTION_BACKUP_PREFIX}{date_text}_*.csv"), reverse=True))
+                candidates.extend(sorted(search_dir.glob(f"{MOTION_BACKUP_PREFIX_LEGACY}{date_text}_*.csv"), reverse=True))
+            candidates.append(search_dir / f"{MOTION_DAILY_PREFIX}{date_text}.csv")
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.resolve() != csv_path.resolve():
+            return candidate
+    return None
+
+
+def load_motion_samples(motion_csv_path: Path | None):
+    if motion_csv_path is None or not motion_csv_path.exists():
+        return [], None
+
+    samples = []
+    with motion_csv_path.open("r", encoding="utf-8", newline="") as handle:
+        header = None
+        index_by_name = {}
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            values = next(csv.reader([line]))
+            if header is None:
+                header = values
+                index_by_name = {name.strip(): idx for idx, name in enumerate(header)}
+                continue
+            timestamp_text = get_header_value(values, index_by_name, ["Timestamp", "DateTime(+0900)", "TimeStr"])
+            timestamp_ms = parse_timestamp_value(timestamp_text)
+            if timestamp_ms is None:
+                continue
+            samples.append({
+                "Timestamp": timestamp_ms,
+                "StepDelta3s": to_int(get_header_value(values, index_by_name, ["StepDelta3s"])),
+                "ConfirmedMode": normalize_mode(get_header_value(values, index_by_name, ["ConfirmedMode"])),
+                "ConstantRegionKind": (get_header_value(values, index_by_name, ["ConstantRegionKind"]) or None),
+                "ConstantRegionSpeedKmh": to_float(get_header_value(values, index_by_name, ["ConstantRegionSpeedKmh"])),
+                "ConstantRegionStartLat": to_float(get_header_value(values, index_by_name, ["ConstantRegionStartLat"])),
+                "ConstantRegionStartLon": to_float(get_header_value(values, index_by_name, ["ConstantRegionStartLon"])),
+                "ConstantRegionEndLat": to_float(get_header_value(values, index_by_name, ["ConstantRegionEndLat"])),
+                "ConstantRegionEndLon": to_float(get_header_value(values, index_by_name, ["ConstantRegionEndLon"])),
+                "ConstantRegionStayLat": to_float(get_header_value(values, index_by_name, ["ConstantRegionStayLat"])),
+                "ConstantRegionStayLon": to_float(get_header_value(values, index_by_name, ["ConstantRegionStayLon"])),
+                "StepDeltaWindow": to_int(get_header_value(values, index_by_name, ["StepDeltaWindow"])),
+                "GpsIntervalMs": to_int(get_header_value(values, index_by_name, ["GpsIntervalMs"])),
+                "GpsImmediate": get_header_bool(values, index_by_name, ["GpsImmediate"]),
+                "KStatus": get_header_value(values, index_by_name, ["KStatus"]) or None,
+                "KAccelSource": get_header_value(values, index_by_name, ["KAccelSource"]) or None,
+                "TrKStatus": get_header_value(values, index_by_name, ["TrKStatus"]) or None,
+                "TrKRawStatus": get_header_value(values, index_by_name, ["TrKRawStatus"]) or None,
+                "WStatus": get_header_value(values, index_by_name, ["WStatus"]) or None,
+            })
+    samples.sort(key=lambda sample: sample["Timestamp"])
+    return samples, motion_csv_path
+
+
+def assign_display_modes(rows, events, motion_samples=None):
+    # Android GpsUtil.kt DISPLAY_MOTION_PARAMS (= MotionStateParams デフォルト値) に準拠
+    WALKING_SPEED_WINDOW_MS = 9_000
+    WALKING_VEHICLE_SPEED_THRESHOLD_KMH = 10.0
+    WALKING_STEP_LENGTH_M = 0.60
+    WALKING_GPS_STEP_MISMATCH_THRESHOLD_KMH = 5.0
+
+    # 初期化: すべての行に基本フィールドをセットする
     for row in rows:
-        while transition_index < len(transitions) and transitions[transition_index]["timestamp"] <= row["Timestamp"]:
-            current_mode = transitions[transition_index]["mode"]
-            transition_index += 1
+        row["DisplayMode"] = "UNKNOWN"
+        row["ConstantRegionKind"] = None
+        row["ConstantRegionStartLat"] = None
+        row["ConstantRegionStartLon"] = None
+        row["ConstantRegionEndLat"] = None
+        row["ConstantRegionEndLon"] = None
+        row["ConstantRegionStayLat"] = None
+        row["ConstantRegionStayLon"] = None
+
+    motion_samples = motion_samples or []
+    if not motion_samples:
+        # Android アプリは MotionSample が無い場合に UNKNOWN のままにする
+        return rows
+
+    # GPS 速度計算用に位置情報のある行を昇順に抽出（Android locatedEntries 相当）
+    located_rows = sorted(
+        [r for r in rows if r.get("Lat") is not None and r.get("Lon") is not None],
+        key=lambda r: r["Timestamp"]
+    )
+
+    def gps_speed_kmh_at(timestamp_ms):
+        """Android gpsSpeedKmhAt の Python 版。
+        [timestamp - window, timestamp) 内の最初と最後の GPS 点から変位速度を計算する。"""
+        if len(located_rows) < 2:
+            return None
+        t_start = timestamp_ms - WALKING_SPEED_WINDOW_MS
+        # lower_bound(t_start)
+        lo, hi = 0, len(located_rows)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if located_rows[mid]["Timestamp"] < t_start:
+                lo = mid + 1
+            else:
+                hi = mid
+        start_idx = lo
+        # upper_bound(timestamp_ms)
+        lo, hi = 0, len(located_rows)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if located_rows[mid]["Timestamp"] <= timestamp_ms:
+                lo = mid + 1
+            else:
+                hi = mid
+        end_exclusive = lo
+        if end_exclusive - start_idx < 2:
+            return None
+        first = located_rows[start_idx]
+        last = located_rows[end_exclusive - 1]
+        dt_ms = last["Timestamp"] - first["Timestamp"]
+        if dt_ms <= 0:
+            return None
+        dist_m = haversine_m(first["Lat"], first["Lon"], last["Lat"], last["Lon"])
+        return dist_m / (dt_ms / 1000.0) * 3.6
+
+    def display_step_speed_kmh(sample):
+        """Android displayStepSpeedKmh の Python 版。
+        stepDeltaWindow × 歩幅 / 窓時間（秒）× 3.6 で km/h に変換。"""
+        steps = sample.get("StepDeltaWindow")
+        if steps is None:
+            return None
+        steps = max(0, int(steps))
+        window_sec = WALKING_SPEED_WINDOW_MS / 1000.0
+        return steps * WALKING_STEP_LENGTH_M / window_sec * 3.6
+
+    def resolve_display_walking_mode(sample, region_kind):
+        """Android resolveDisplayWalkingMode の Python 版。
+        GPS速度 or 定速領域速度で WALKING を VEHICLE に上書きするかを判定する。"""
+        gps_speed = gps_speed_kmh_at(sample["Timestamp"])
+        # Android withConstantMoveFallback: GPS 速度が無ければ定速領域速度をフォールバックに使う
+        if gps_speed is None and region_kind == "CONSTANT_MOVE":
+            speed_raw = sample.get("ConstantRegionSpeedKmh")
+            if speed_raw is not None:
+                gps_speed = float(speed_raw)
+        step_speed = display_step_speed_kmh(sample)
+        if gps_speed is not None and gps_speed >= WALKING_VEHICLE_SPEED_THRESHOLD_KMH:
+            return "VEHICLE"
+        if (gps_speed is not None and step_speed is not None
+                and abs(gps_speed - step_speed) >= WALKING_GPS_STEP_MISMATCH_THRESHOLD_KMH):
+            return "VEHICLE"
+        return "WALKING"
+
+    def parse_region_kind(raw):
+        """ConstantRegionKind を正規化し NONE は null 扱い（Android parseConstantRegionKind 相当）。"""
+        if not raw:
+            return None
+        normalized = str(raw).strip().upper()
+        return None if normalized in ("NONE", "NULL", "") else normalized
+
+    def provisional_mode_from_new_state(sample, region_kind):
+        """Android provisionalModeFromNewState の Python 版（allowOpenRegionFallback=True）。
+        lastConfirmedIndex 以降の未確定サンプルから暫定モードを推定する。"""
+        k_status = sample.get("KStatus")
+        w_status = sample.get("WStatus")
+        if k_status in ("STK4", "K4"):
+            return "VEHICLE"
+        if w_status == "W1":
+            return resolve_display_walking_mode(sample, region_kind)
+        if region_kind == "CONSTANT_MOVE":
+            return "VEHICLE"
+        if region_kind == "STAY":
+            return "DEVICE_STILL" if k_status in ("STK1", "K1") else "STOPPED"
+        # allowOpenRegionFallback: stK が有効かつ W2 → 暫定停止として扱う
+        if k_status is not None and w_status == "W2":
+            return "DEVICE_STILL" if k_status in ("STK1", "K1") else "STOPPED"
+        return None
+
+    # lastConfirmedIndex: confirmedMode が設定されている最後のサンプルのインデックス
+    # Android inferModeStatesFromConfirmedCache の lastConfirmedIndex 相当
+    last_confirmed_index = -1
+    for i, s in enumerate(motion_samples):
+        if s.get("ConfirmedMode") is not None:
+            last_confirmed_index = i
+
+    # ── ModeState リストを構築 ────────────────────────────────────────────────
+    # Android inferModeStatesFromConfirmedCache に完全準拠:
+    #   1. confirmedMode があるサンプル → displayModeFromConfirmedSample（WALKING のみ再評価）
+    #   2. lastConfirmedIndex 以降の unconfirmed サンプル → provisionalModeFromNewState
+    mode_states = []
+    for i, sample in enumerate(motion_samples):
+        region_kind = parse_region_kind(sample.get("ConstantRegionKind"))
+        confirmed_mode = sample.get("ConfirmedMode")
+
+        if confirmed_mode is not None:
+            # Android displayModeFromConfirmedSample: WALKING のみ GPS 速度で再評価
+            if confirmed_mode == "WALKING":
+                display_mode = resolve_display_walking_mode(sample, region_kind)
+            else:
+                display_mode = confirmed_mode
+            mode_states.append({
+                "timestamp": sample["Timestamp"],
+                "mode": display_mode,
+                "region_kind": region_kind,
+                "start_lat": sample.get("ConstantRegionStartLat"),
+                "start_lon": sample.get("ConstantRegionStartLon"),
+                "end_lat": sample.get("ConstantRegionEndLat"),
+                "end_lon": sample.get("ConstantRegionEndLon"),
+                "stay_lat": sample.get("ConstantRegionStayLat"),
+                "stay_lon": sample.get("ConstantRegionStayLon"),
+            })
+        elif i > last_confirmed_index:
+            # lastConfirmedIndex 以降の未確定区間のみ暫定モードを推定
+            prov = provisional_mode_from_new_state(sample, region_kind)
+            if prov is not None:
+                mode_states.append({
+                    "timestamp": sample["Timestamp"],
+                    "mode": prov,
+                    "region_kind": region_kind,
+                    "start_lat": sample.get("ConstantRegionStartLat"),
+                    "start_lon": sample.get("ConstantRegionStartLon"),
+                    "end_lat": sample.get("ConstantRegionEndLat"),
+                    "end_lon": sample.get("ConstantRegionEndLon"),
+                    "stay_lat": sample.get("ConstantRegionStayLat"),
+                    "stay_lon": sample.get("ConstantRegionStayLon"),
+                })
+
+    # ── ModeState を rows にキャリーフォワードで適用 ────────────────────────────
+    # Android buildDisplayPoints の while ループキャリーフォワード相当
+    state_index = 0
+    current_mode = "UNKNOWN"
+    current_region_kind = None
+    current_start_lat = None
+    current_start_lon = None
+    current_end_lat = None
+    current_end_lon = None
+    current_stay_lat = None
+    current_stay_lon = None
+
+    for row in rows:
+        while state_index < len(mode_states) and mode_states[state_index]["timestamp"] <= row["Timestamp"]:
+            st = mode_states[state_index]
+            current_mode = st["mode"]
+            current_region_kind = st["region_kind"]
+            current_start_lat = st["start_lat"]
+            current_start_lon = st["start_lon"]
+            current_end_lat = st["end_lat"]
+            current_end_lon = st["end_lon"]
+            current_stay_lat = st["stay_lat"]
+            current_stay_lon = st["stay_lon"]
+            state_index += 1
         row["DisplayMode"] = current_mode
+        row["ConstantRegionKind"] = current_region_kind
+        row["ConstantRegionStartLat"] = current_start_lat
+        row["ConstantRegionStartLon"] = current_start_lon
+        row["ConstantRegionEndLat"] = current_end_lat
+        row["ConstantRegionEndLon"] = current_end_lon
+        row["ConstantRegionStayLat"] = current_stay_lat
+        row["ConstantRegionStayLon"] = current_stay_lon
+
+    # デバッグ情報を出力
+    debug_info = {
+        "summary": {
+            "total_rows": len(rows),
+            "has_motion_samples": True,
+            "motion_sample_count": len(motion_samples),
+            "mode_states_count": len(mode_states),
+            "last_confirmed_index": last_confirmed_index,
+        },
+        "rows_sample": [],
+        "transitions": []
+    }
+
+    last_mode = None
+    for i, r in enumerate(rows):
+        mode = r.get("DisplayMode")
+        kind = str(r.get("ConstantRegionKind") or "NONE").upper()
+        if i < 50:
+            debug_info["rows_sample"].append({"idx": i, "ts": r["dt"], "mode": mode, "kind": kind})
+        if mode != last_mode:
+            debug_info["transitions"].append({"idx": i, "ts": r["dt"], "from": last_mode, "to": mode, "kind": kind})
+            last_mode = mode
+
+    debug_path = SCRIPT_DIR / "debug_aggregation.json"
+    with debug_path.open("w", encoding="utf-8") as f:
+        json.dump(debug_info, f, ensure_ascii=False, indent=2)
+    print(f"[Debug] Aggregation log saved to {debug_path}")
+
     return rows
 
 
 def recompute_steps_cumulative(rows):
     cumulative = 0
+    current_day_start = None
     for row in rows:
+        day_start = get_logging_start(row["Timestamp"])
+        if current_day_start != day_start:
+            current_day_start = day_start
+            cumulative = 0
         cumulative += row["StepsDelta"]
         row["StepsCumulative"] = cumulative
     return rows
@@ -287,6 +606,33 @@ def create_interpolated_series(times, values, interval_ms):
     new_times = [start_time + index * interval_ms for index in range(count)]
     new_values = [interpolate_linear(times, values, target_time) for target_time in new_times]
     return new_times, new_values
+
+
+def create_step_series(rows, target_times):
+    if not rows:
+        return [None] * len(target_times)
+    resolved_rows = sorted(rows, key=lambda row: row["Timestamp"])
+    steps = []
+    row_index = 0
+    cumulative_steps = 0
+    current_day_start = get_logging_start(target_times[0]) if target_times else None
+    has_accepted_row = False
+    for target_time in target_times:
+        target_day_start = get_logging_start(target_time)
+        if target_day_start != current_day_start:
+            current_day_start = target_day_start
+            cumulative_steps = 0
+        while row_index < len(resolved_rows) and resolved_rows[row_index]["Timestamp"] <= target_time:
+            row = resolved_rows[row_index]
+            row_day_start = get_logging_start(row["Timestamp"])
+            if row_day_start != current_day_start:
+                current_day_start = row_day_start
+                cumulative_steps = 0
+            cumulative_steps += max(0, row["StepsDelta"])
+            has_accepted_row = True
+            row_index += 1
+        steps.append(cumulative_steps if has_accepted_row or target_time >= resolved_rows[0]["Timestamp"] else None)
+    return steps
 
 
 def interpolate_linear(x_values, y_values, x_target):
@@ -380,7 +726,8 @@ def get_processed_graph_mode(rows):
             cumulative_steps = 0.0
         cumulative_steps += row["StepsDelta"]
         raw_steps.append(cumulative_steps)
-    times, steps = create_interpolated_series(raw_times, raw_steps, GRAPH_INTERVAL_MS)
+    times, _ = create_interpolated_series(raw_times, raw_steps, GRAPH_INTERVAL_MS)
+    steps = create_step_series(distinct, times)
     altitude = moving_average(create_metric_series(distinct, times, "Alt"), 40)
     pressure_raw = moving_average(create_metric_series(distinct, times, "PresRaw"), 40)
     pressure_qnh = moving_average(create_metric_series(distinct, times, "PresQnh"), 40)
@@ -388,6 +735,7 @@ def get_processed_graph_mode(rows):
     corrected_map_rows = map_filter_outliers(rows)
     return {
         "labels": labels,
+        "timestamps": times,
         "pressureRaw": pressure_raw,
         "pressureQnh": pressure_qnh,
         "altitude": altitude,
@@ -411,7 +759,11 @@ def haversine_m(lat1, lon1, lat2, lon2):
 
 
 def map_filter_outliers(rows):
-    location_rows = [dict(row) for row in rows if row["GpsValid"]]
+    location_rows = [
+        dict(row)
+        for row in rows
+        if row["GpsValid"] and (row.get("GpsAccuracy") is None or row.get("GpsAccuracy") <= MAX_REASONABLE_ACCURACY_M)
+    ]
     if len(location_rows) <= 2:
         return location_rows
 
@@ -600,23 +952,32 @@ def is_suspicious_boundary(from_row, to_row):
     return speed_kmh >= CLUSTER_BOUNDARY_MIN_SPEED_KMH
 
 
-def build_mode_data(rows):
+def build_mode_data(rows, events=None, motion_samples=None):
     graph_rows = clone_rows(rows)
     map_rows = [dict(row) for row in rows if row["GpsValid"]]
+    state_labels = build_state_labels(map_rows, motion_samples or [])
+    trk_labels = build_trk_labels(map_rows, motion_samples or [])
     return {
         "labels": [row["dt"][5:] for row in graph_rows],
+        "timestamps": [row["Timestamp"] for row in graph_rows],
         "pressureRaw": [row["PresRaw"] for row in graph_rows],
         "pressureQnh": [row["PresQnh"] for row in graph_rows],
         "altitude": [row["Alt"] for row in graph_rows],
         "stepsCumulative": [row["StepsCumulative"] for row in graph_rows],
         "stepModes": [row.get("DisplayMode") for row in graph_rows],
         "gpsPoints": build_gps_points(map_rows),
+        "stateLabels": state_labels,
+        "trkLabels": trk_labels,
         "summary": summarize_mode_rows(graph_rows, map_rows, graph_point_count=len(graph_rows)),
     }
 
 
-def build_corrected_mode_data(rows):
-    return get_processed_graph_mode(rows)
+def build_corrected_mode_data(rows, events=None, motion_samples=None):
+    corrected = get_processed_graph_mode(rows)
+    corrected_map_rows = map_filter_outliers(rows)
+    corrected["stateLabels"] = build_state_labels(corrected_map_rows, motion_samples or [])
+    corrected["trkLabels"] = build_trk_labels(corrected_map_rows, motion_samples or [])
+    return corrected
 
 
 def build_gps_points(rows):
@@ -629,9 +990,139 @@ def build_gps_points(rows):
             "alt": row["Alt"],
             "timestamp": row["Timestamp"],
             "displayMode": row.get("DisplayMode"),
+            "constantRegionKind": row.get("ConstantRegionKind"),
+            "constantRegionStartLat": row.get("ConstantRegionStartLat"),
+            "constantRegionStartLon": row.get("ConstantRegionStartLon"),
+            "constantRegionEndLat": row.get("ConstantRegionEndLat"),
+            "constantRegionEndLon": row.get("ConstantRegionEndLon"),
+            "constantRegionStayLat": row.get("ConstantRegionStayLat"),
+            "constantRegionStayLon": row.get("ConstantRegionStayLon"),
         }
         for row in rows
     ]
+
+
+def nearest_located_row(located_rows, timestamp_ms: int):
+    if not located_rows:
+        return None
+    low = 0
+    high = len(located_rows)
+    while low < high:
+        mid = (low + high) // 2
+        if located_rows[mid]["Timestamp"] < timestamp_ms:
+            low = mid + 1
+        else:
+            high = mid
+    if low <= 0:
+        return located_rows[0]
+    if low >= len(located_rows):
+        return located_rows[-1]
+    before = located_rows[low - 1]
+    after = located_rows[low]
+    if (timestamp_ms - before["Timestamp"]) <= (after["Timestamp"] - timestamp_ms):
+        return before
+    return after
+
+
+def parse_constant_region_kind(value):
+    text = (value or "").strip().upper()
+    if text == "STAY":
+        return "STAY"
+    if text == "CONSTANT_MOVE":
+        return "CONSTANT_MOVE"
+    return None
+
+
+def stk_label_color(value):
+    return {
+        "STK1": STATE_LABEL_COLOR_STK1,
+        "K1": STATE_LABEL_COLOR_STK1,
+        "STK2": STATE_LABEL_COLOR_STK2,
+        "K2_K3": STATE_LABEL_COLOR_STK2,
+        "STK4": STATE_LABEL_COLOR_STK4,
+        "K4": STATE_LABEL_COLOR_STK4,
+    }.get((value or "").strip().upper())
+
+
+def w_label_color(value):
+    return STATE_LABEL_COLOR_W1 if (value or "").strip().upper() == "W1" else STATE_LABEL_COLOR_W2
+
+
+def build_state_labels(rows, motion_samples):
+    if not rows or not motion_samples:
+        return []
+    located_rows = [row for row in rows if row["GpsValid"]]
+    if not located_rows:
+        return []
+    labels = []
+    prev_stk = None
+    prev_w = None
+    prev_region = None
+    for sample in sorted(motion_samples, key=lambda item: item["Timestamp"]):
+        stk = (sample.get("KStatus") or "").strip().upper() or None
+        w = (sample.get("WStatus") or "").strip().upper() or None
+        region = parse_constant_region_kind(sample.get("ConstantRegionKind"))
+        stk_changed = stk is not None and stk != prev_stk
+        w_changed = w is not None and w != prev_w
+        region_changed = region != prev_region
+        if stk_changed or w_changed or region_changed:
+            nearest = nearest_located_row(located_rows, sample["Timestamp"])
+            if nearest is not None:
+                lat = nearest.get("Lat")
+                lon = nearest.get("Lon")
+                if lat is not None and lon is not None:
+                    if stk_changed:
+                        label_text = {
+                            "STK1": "K1",
+                            "K1": "K1",
+                            "STK2": "K2",
+                            "K2_K3": "K2",
+                            "STK4": "K4",
+                            "K4": "K4",
+                        }.get(stk)
+                        bg_color = stk_label_color(stk)
+                        if label_text and bg_color:
+                            labels.append({"lat": lat, "lon": lon, "text": label_text, "bgColor": bg_color})
+                    if w_changed and w:
+                        labels.append({"lat": lat, "lon": lon, "text": w, "bgColor": w_label_color(w)})
+                    if region_changed:
+                        if region == "STAY":
+                            labels.append({"lat": lat, "lon": lon, "text": "STAY", "bgColor": STATE_LABEL_COLOR_STAY})
+                        elif region == "CONSTANT_MOVE":
+                            labels.append({"lat": lat, "lon": lon, "text": "CMOV", "bgColor": STATE_LABEL_COLOR_CMOVE})
+        if stk is not None:
+            prev_stk = stk
+        if w is not None:
+            prev_w = w
+        prev_region = region
+    return labels
+
+
+def build_trk_labels(rows, motion_samples):
+    if not rows or not motion_samples:
+        return []
+    located_rows = [row for row in rows if row["GpsValid"]]
+    if not located_rows:
+        return []
+    labels = []
+    prev_trk = None
+    for sample in sorted(motion_samples, key=lambda item: item["Timestamp"]):
+        trk = (sample.get("TrKStatus") or "").strip().upper() or None
+        if trk is not None and trk != prev_trk:
+            nearest = nearest_located_row(located_rows, sample["Timestamp"])
+            if nearest is not None:
+                lat = nearest.get("Lat")
+                lon = nearest.get("Lon")
+                if lat is not None and lon is not None:
+                    labels.append({
+                        "lat": lat,
+                        "lon": lon,
+                        "text": "tON" if trk == "ON" else "tOFF",
+                        "bgColor": STATE_LABEL_COLOR_TRK_ON if trk == "ON" else STATE_LABEL_COLOR_TRK_OFF,
+                    })
+        if trk is not None:
+            prev_trk = trk
+    return labels
 
 
 def summarize_mode_rows(graph_rows, map_rows, graph_point_count):
@@ -671,10 +1162,7 @@ def filter_latest_session(rows, events, session_gap_minutes: int):
     session_start_ts = session_rows[0]["Timestamp"]
     session_events = [event for event in events if event["timestamp"] >= session_start_ts]
 
-    cumulative = 0
-    for row in session_rows:
-        cumulative += row["StepsDelta"]
-        row["StepsCumulative"] = cumulative
+    recompute_steps_cumulative(session_rows)
 
     session_info = {
         "mode": "latest-session",
@@ -685,7 +1173,7 @@ def filter_latest_session(rows, events, session_gap_minutes: int):
     return session_rows, session_events, session_info
 
 
-def summarize_rows(rows, events, csv_path: Path, session_info=None):
+def summarize_rows(rows, events, csv_path: Path, motion_csv_path: Path | None = None, session_info=None):
     first_row = rows[0]
     last_row = rows[-1]
     summary = {
@@ -694,6 +1182,7 @@ def summarize_rows(rows, events, csv_path: Path, session_info=None):
         "last": last_row["dt"],
         "event_count": len(events),
         "source_file": str(csv_path),
+        "motion_source_file": str(motion_csv_path) if motion_csv_path else "none",
     }
     if session_info:
         summary["view_mode"] = session_info["mode"]
@@ -727,6 +1216,8 @@ def print_summary(summary, events, mode_data, selected_mode, selected_date_key):
         for event in events[-8:]:
             print(f"  {event['dt']} {event['message']}")
     print(f"Source file: {summary['source_file']}")
+    if summary.get("motion_source_file") and summary["motion_source_file"] != "none":
+        print(f"Motion source file: {summary['motion_source_file']}")
 
 
 def build_date_key_options(rows):
@@ -749,28 +1240,41 @@ def filter_events_by_date(events, date_key):
     return [dict(event) for event in events if event["dt"].startswith(date_key)]
 
 
-def build_mode_data_by_date(rows, events):
+def filter_motion_samples_by_date(motion_samples, date_key):
+    return [dict(sample) for sample in motion_samples if timestamp_to_jst_date_key(sample["Timestamp"]) == date_key]
+
+
+def build_mode_data_by_date(rows, events, motion_samples=None):
+    motion_samples = motion_samples or []
     date_keys = build_date_key_options(rows)
     mode_data = {}
     events_by_date = {"all": events[-50:]}
     for date_key in date_keys:
         date_rows = filter_rows_by_date(rows, date_key)
+        date_motion_samples = filter_motion_samples_by_date(motion_samples, date_key)
+        date_events = filter_events_by_date(events, date_key)
         mode_data[date_key] = {
-            "raw": build_mode_data(date_rows),
-            "corrected": build_corrected_mode_data(date_rows),
+            "raw": build_mode_data(date_rows, date_events, date_motion_samples),
+            "corrected": build_corrected_mode_data(date_rows, date_events, date_motion_samples),
         }
-        events_by_date[date_key] = filter_events_by_date(events, date_key)[-50:]
+        events_by_date[date_key] = date_events[-50:]
     mode_data["all"] = {
-        "raw": build_mode_data(rows),
-        "corrected": build_corrected_mode_data(rows),
+        "raw": build_mode_data(rows, events, motion_samples),
+        "corrected": build_corrected_mode_data(rows, events, motion_samples),
     }
     return mode_data, events_by_date, ["all", *date_keys]
 
 
 def build_dashboard_payload(mode_data, events_by_date, summary, initial_correction, date_keys, initial_date_key):
+    payload_mode_data = mode_data
+    payload_events = events_by_date
+    if initial_date_key in mode_data:
+        payload_mode_data = {initial_date_key: mode_data[initial_date_key]}
+    if initial_date_key in events_by_date:
+        payload_events = {initial_date_key: events_by_date[initial_date_key]}
     payload = {
-        "modesByDate": mode_data,
-        "eventsByDate": events_by_date,
+        "modesByDate": payload_mode_data,
+        "eventsByDate": payload_events,
         "commonSummary": summary,
         "initialCorrection": initial_correction,
         "dateKeys": date_keys,
@@ -779,7 +1283,7 @@ def build_dashboard_payload(mode_data, events_by_date, summary, initial_correcti
     return json.dumps(payload, ensure_ascii=False)
 
 
-def render_dashboard_html(payload_json: str, title: str) -> str:
+def render_dashboard_html(payload_json: str, title: str, tile_url_template: str) -> str:
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -884,15 +1388,50 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
     }}
     .direction-arrow {{
       color: rgba(49, 120, 255, 0.92);
-      font-size: 18px;
+      font-size: 30px;
       font-weight: 800;
       line-height: 1;
       text-shadow:
-        0 0 2px rgba(9, 17, 31, 0.95),
-        0 0 6px rgba(9, 17, 31, 0.85);
+        -1px -1px 0 rgba(255,255,255,0.92),
+        1px -1px 0 rgba(255,255,255,0.92),
+        -1px 1px 0 rgba(255,255,255,0.92),
+        1px 1px 0 rgba(255,255,255,0.92);
       transform-origin: center center;
       pointer-events: none;
       user-select: none;
+    }}
+    .state-label-stack {{
+      pointer-events: none;
+      user-select: none;
+      white-space: nowrap;
+    }}
+    .state-label-badge {{
+      min-width: 28px;
+      padding: 2px 6px;
+      border-radius: 7px;
+      color: #ffffff;
+      font-size: 9px;
+      font-weight: 700;
+      line-height: 1.15;
+      text-align: center;
+      box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+      pointer-events: none;
+      user-select: none;
+      white-space: nowrap;
+      border: 1px solid rgba(255,255,255,0.34);
+    }}
+    .ring-marker {{
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #ffffff;
+      box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+    }}
+    .ring-marker.start {{
+      border: 3px solid #e53935;
+    }}
+    .ring-marker.current {{
+      border: 3px solid #3178ff;
     }}
     .layout {{
       display: grid;
@@ -1018,9 +1557,11 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
           <div class="toolbar">
             <label for="mapTimeFocus">地図時間</label>
             <select id="mapTimeFocus">
-              <option value="all">全日</option>
-              <option value="focus" selected>偏差フォーカス連動</option>
+              <option value="all" selected>全日</option>
+              <option value="focus">偏差フォーカス連動</option>
             </select>
+            <label><input type="checkbox" id="showStateLabels"> K/W</label>
+            <label><input type="checkbox" id="showTrkLabels"> trK</label>
           </div>
           <div id="map"></div>
         </section>
@@ -1039,7 +1580,8 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
       ['first', 'First'],
       ['last', 'Last'],
       ['event_count', 'Events'],
-      ['source_file', 'Source']
+      ['source_file', 'Source'],
+      ['motion_source_file', 'Motion Source']
     ];
     const modeSummaryOrder = [
       ['rows', 'Display Rows'],
@@ -1059,6 +1601,8 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
     const stopDeviationFocusSelect = document.getElementById('stopDeviationFocus');
     const stopDeviationWindowMinutesSelect = document.getElementById('stopDeviationWindowMinutes');
     const mapTimeFocusSelect = document.getElementById('mapTimeFocus');
+    const showStateLabelsCheckbox = document.getElementById('showStateLabels');
+    const showTrkLabelsCheckbox = document.getElementById('showTrkLabels');
     const APP_DEVICE_STILL_WINDOW_COUNT = 5;
     const APP_STOPPED_WINDOW_COUNT = 3;
     payload.dateKeys.forEach((dateKey) => {{
@@ -1070,7 +1614,9 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
     dateKeySelect.value = payload.initialDateKey;
     correctionSelect.value = payload.initialCorrection;
     stopDeviationWindowMinutesSelect.value = '5';
-    mapTimeFocusSelect.value = 'focus';
+    mapTimeFocusSelect.value = 'all';
+    showStateLabelsCheckbox.checked = false;
+    showTrkLabelsCheckbox.checked = false;
 
     const stopNormalizationParams = {{
       DEVICE_STILL: {{
@@ -1205,7 +1751,7 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
       {{
         label: 'Pressure (Raw)',
         data: [],
-        borderColor: '#58d26a',
+        borderColor: '#4caf50',
         backgroundColor: 'rgba(88,210,106,0.15)',
         pointRadius: 0,
         borderWidth: 1.4,
@@ -1214,7 +1760,7 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
       {{
         label: 'Pressure (QNH)',
         data: [],
-        borderColor: '#f4f7ff',
+        borderColor: '#ffffff',
         backgroundColor: 'rgba(244,247,255,0.10)',
         pointRadius: 0,
         borderWidth: 1.4,
@@ -1226,7 +1772,7 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
       {{
         label: 'Altitude',
         data: [],
-        borderColor: '#ffdd57',
+        borderColor: '#ffeb3b',
         backgroundColor: 'rgba(255,221,87,0.14)',
         pointRadius: 0,
         borderWidth: 1.6,
@@ -1259,6 +1805,7 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
       pointRadius: 0,
       borderWidth: modeKey === 'WALKING' ? 1.8 : 1.6,
       fill: false,
+      stepped: true,
       spanGaps: false
     }})));
 
@@ -1285,7 +1832,7 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
     let currentDeviationContext = null;
 
     const map = L.map('map');
-    L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    L.tileLayer('{tile_url_template}', {{
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap'
     }}).addTo(map);
@@ -1293,38 +1840,130 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
     let mapStartMarker = null;
     let mapLatestMarker = null;
     let mapDirectionLayer = L.layerGroup().addTo(map);
+    let mapStateLabelLayer = L.layerGroup().addTo(map);
+    let mapTrkLabelLayer = L.layerGroup().addTo(map);
     const directionArrowParams = {{
-      minSpacingM: 360.0,
-      minSegmentM: 18.0,
-      startEndSkipM: 40.0,
-      maxTurnDeg: 22.0,
+      minSpacingPx: 36.0,
+      minSegmentPx: 12.0,
+      startEndSkipPx: 18.0,
       localBearingWindow: 2
     }};
 
-    function smoothGpsPoints(points) {{
-      if (points.length < 5) {{
-        return points;
-      }}
-      const windowRadius = 2;
-      return points.map((point, index) => {{
-        if (index < windowRadius || index >= points.length - windowRadius) {{
-          return point;
-        }}
-        let latSum = 0;
-        let lonSum = 0;
-        let count = 0;
-        for (let offset = -windowRadius; offset <= windowRadius; offset += 1) {{
-          const candidate = points[index + offset];
-          latSum += candidate.lat;
-          lonSum += candidate.lon;
-          count += 1;
-        }}
-        return {{
-          ...point,
-          lat: latSum / count,
-          lon: lonSum / count
-        }};
+    function renderLabelLayer(layer, labels) {{
+      const stackedCounts = new Map();
+      labels.forEach((label) => {{
+        const stackKey = `${{label.lat.toFixed(6)}},${{label.lon.toFixed(6)}}`;
+        const stackIndex = stackedCounts.get(stackKey) || 0;
+        stackedCounts.set(stackKey, stackIndex + 1);
+        const offsetY = -10 - (stackIndex * 14);
+        L.marker([label.lat, label.lon], {{
+          interactive: false,
+          keyboard: false,
+          icon: L.divIcon({{
+            className: '',
+            html: `<div class="state-label-stack" style="transform: translateY(${{offsetY}}px);"><div class="state-label-badge" style="background:${{label.bgColor}};">${{label.text}}</div></div>`,
+            iconSize: [56, 22 + stackIndex * 14],
+            iconAnchor: [28, 11]
+          }})
+        }})
+          .setZIndexOffset(1000 + stackIndex)
+          .addTo(layer);
       }});
+    }}
+
+    function smoothGpsPoints(points) {{
+      if (points.length < 5) return points;
+      const windowRadius = 2;
+      let skipCount = 0;
+      const result = points.map((p, i) => {{
+        // Android smoothPolylineTrack に合わせた除外条件:
+        //   停止集約点 / VEHICLE モード / 窓内に停止点またはモード違いがある場合はスキップ
+        if (p.isStayAggregate) {{ skipCount++; return p; }}
+        const mode = p.displayMode || 'UNKNOWN';
+        if (mode === 'VEHICLE') {{ skipCount++; return p; }}
+        for (let off = -windowRadius; off <= windowRadius; off++) {{
+          const neighbor = points[i + off];
+          if (!neighbor) continue;
+          if (neighbor.isStayAggregate) {{ skipCount++; return p; }}
+          if ((neighbor.displayMode || 'UNKNOWN') !== mode) {{ skipCount++; return p; }}
+        }}
+        let latSum = 0, lonSum = 0, count = 0;
+        for (let off = -windowRadius; off <= windowRadius; off++) {{
+          const target = points[i + off];
+          if (target) {{ latSum += target.lat; lonSum += target.lon; count++; }}
+        }}
+        return {{ ...p, lat: latSum / count, lon: lonSum / count }};
+      }});
+      console.log(`[Smooth] Applied moving average. Skipped ${{skipCount}} points.`);
+      return result;
+    }}
+
+    // ── Catmull-Rom スプライン（Android splineMovingTrack 相当） ──────────────
+
+    function projectToLocalMeters(lat, lon, originLat, originLon) {{
+      const mpd = 111320.0;
+      return {{
+        x: (lon - originLon) * mpd * Math.cos(originLat * Math.PI / 180.0),
+        y: (lat - originLat) * mpd
+      }};
+    }}
+
+    function unprojectFromLocalMeters(x, y, originLat, originLon) {{
+      const mpd = 111320.0;
+      const mpdLon = mpd * Math.cos(originLat * Math.PI / 180.0);
+      return {{
+        lat: originLat + y / mpd,
+        lon: originLon + x / Math.max(1e-9, mpdLon)
+      }};
+    }}
+
+    function catmullRomLocal(p0, p1, p2, p3, t, tension) {{
+      const t2 = t * t, t3 = t2 * t;
+      const tangentScale = Math.max(0.0, Math.min(1.0, 1.0 - tension));
+      const m1x = tangentScale * (p2.x - p0.x);
+      const m1y = tangentScale * (p2.y - p0.y);
+      const m2x = tangentScale * (p3.x - p1.x);
+      const m2y = tangentScale * (p3.y - p1.y);
+      return {{
+        x:
+          (2*t3 - 3*t2 + 1)*p1.x +
+          (t3 - 2*t2 + t)*m1x +
+          (-2*t3 + 3*t2)*p2.x +
+          (t3 - t2)*m2x,
+        y:
+          (2*t3 - 3*t2 + 1)*p1.y +
+          (t3 - 2*t2 + t)*m1y +
+          (-2*t3 + 3*t2)*p2.y +
+          (t3 - t2)*m2y
+      }};
+    }}
+
+    function splineSegmentPoints(points, samplesPerSegment) {{
+      // Android: MAP_SPLINE_SAMPLES_PER_SEGMENT=5, MAP_SPLINE_EDGE_LINEAR_SEGMENTS=0, tension=0.55
+      if (points.length < 3 || samplesPerSegment <= 0) return points;
+      const origin = points[0];
+      const proj = points.map(p => projectToLocalMeters(p.lat, p.lon, origin.lat, origin.lon));
+      const result = [points[0]];
+      const edgeLinear = 0;
+      const tension = 0.55;
+      const splineStart = edgeLinear;
+      const splineEnd = Math.max(splineStart, points.length - 1 - edgeLinear);
+      for (let i = 0; i < points.length - 1; i++) {{
+        const p0 = proj[Math.max(0, i - 1)];
+        const p1 = proj[i];
+        const p2 = proj[i + 1];
+        const p3 = proj[Math.min(points.length - 1, i + 2)];
+        if (i >= splineStart && i < splineEnd) {{
+          for (let s = 1; s <= samplesPerSegment; s++) {{
+            const t = s / (samplesPerSegment + 1);
+            const local = catmullRomLocal(p0, p1, p2, p3, t, tension);
+            const coord = unprojectFromLocalMeters(local.x, local.y, origin.lat, origin.lon);
+            result.push({{ ...points[i], lat: coord.lat, lon: coord.lon }});
+          }}
+        }}
+        result.push(points[i + 1]);
+      }}
+      return result;
     }}
 
     function haversineMeters(lat1, lon1, lat2, lon2) {{
@@ -1372,46 +2011,45 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
       return (Math.atan2(sinSum, cosSum) * 180.0 / Math.PI + 360.0) % 360.0;
     }}
 
-    function computeDirectionArrowMarkers(points) {{
+    function computeDirectionArrowMarkersOnScreen(points) {{
       if (points.length < 4) {{
         return [];
       }}
+      const screenPoints = points.map((point) => map.latLngToContainerPoint([point.lat, point.lon]));
       const cumulativeDistances = [0.0];
       for (let index = 1; index < points.length; index += 1) {{
         cumulativeDistances.push(
-          cumulativeDistances[index - 1] + haversineMeters(
-            points[index - 1].lat,
-            points[index - 1].lon,
-            points[index].lat,
-            points[index].lon
+          cumulativeDistances[index - 1] + Math.hypot(
+            screenPoints[index].x - screenPoints[index - 1].x,
+            screenPoints[index].y - screenPoints[index - 1].y
           )
         );
       }}
       const totalDistance = cumulativeDistances[cumulativeDistances.length - 1];
-      if (totalDistance < directionArrowParams.startEndSkipM * 2) {{
+      if (totalDistance < directionArrowParams.startEndSkipPx * 2) {{
         return [];
       }}
 
       const markers = [];
-      let lastPlacedDistance = -directionArrowParams.minSpacingM;
+      let lastPlacedDistance = -directionArrowParams.minSpacingPx;
       for (let index = 1; index < points.length - 1; index += 1) {{
         const distanceAlong = cumulativeDistances[index];
-        if (distanceAlong < directionArrowParams.startEndSkipM) {{
+        if (distanceAlong < directionArrowParams.startEndSkipPx) {{
           continue;
         }}
-        if ((totalDistance - distanceAlong) < directionArrowParams.startEndSkipM) {{
+        if ((totalDistance - distanceAlong) < directionArrowParams.startEndSkipPx) {{
           continue;
         }}
-        if ((distanceAlong - lastPlacedDistance) < directionArrowParams.minSpacingM) {{
+        if ((distanceAlong - lastPlacedDistance) < directionArrowParams.minSpacingPx) {{
           continue;
         }}
 
-        const previous = points[index - 1];
-        const current = points[index];
-        const following = points[index + 1];
-        const beforeDistance = haversineMeters(previous.lat, previous.lon, current.lat, current.lon);
-        const afterDistance = haversineMeters(current.lat, current.lon, following.lat, following.lon);
-        if (beforeDistance < directionArrowParams.minSegmentM || afterDistance < directionArrowParams.minSegmentM) {{
+        const previous = screenPoints[index - 1];
+        const currentPoint = screenPoints[index];
+        const following = screenPoints[index + 1];
+        const beforeDistance = Math.hypot(currentPoint.x - previous.x, currentPoint.y - previous.y);
+        const afterDistance = Math.hypot(following.x - currentPoint.x, following.y - currentPoint.y);
+        if (beforeDistance < directionArrowParams.minSegmentPx || afterDistance < directionArrowParams.minSegmentPx) {{
           continue;
         }}
 
@@ -1419,31 +2057,24 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
         const localStart = Math.max(0, index - directionArrowParams.localBearingWindow);
         const localEnd = Math.min(points.length - 2, index + directionArrowParams.localBearingWindow);
         for (let segmentIndex = localStart; segmentIndex <= localEnd; segmentIndex += 1) {{
-          const startPoint = points[segmentIndex];
-          const endPoint = points[segmentIndex + 1];
-          const segmentDistance = haversineMeters(startPoint.lat, startPoint.lon, endPoint.lat, endPoint.lon);
-          if (segmentDistance < directionArrowParams.minSegmentM) {{
+          const startPoint = screenPoints[segmentIndex];
+          const endPoint = screenPoints[segmentIndex + 1];
+          const segmentDistance = Math.hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y);
+          if (segmentDistance < directionArrowParams.minSegmentPx) {{
             continue;
           }}
-          localAngles.push(bearingDegrees(startPoint.lat, startPoint.lon, endPoint.lat, endPoint.lon));
+          localAngles.push(Math.atan2(endPoint.y - startPoint.y, endPoint.x - startPoint.x) * 180.0 / Math.PI);
         }}
-        if (localAngles.length < 2) {{
+        if (localAngles.length === 0) {{
           continue;
         }}
 
         const meanAngle = circularMeanDegrees(localAngles);
-        const maxTurn = Math.max(...localAngles.map((angle) => smallestAngleDiffDeg(angle, meanAngle)));
-        if (maxTurn > directionArrowParams.maxTurnDeg) {{
-          continue;
-        }}
-
         markers.push({{
-          lat: current.lat,
-          lon: current.lon,
-          displayMode: current.displayMode || 'UNKNOWN',
-          // Bearing is north=0, clockwise. The ">" glyph points right at 0deg,
-          // so shift by -90deg to align the glyph with map direction.
-          angle: meanAngle - 90.0
+          lat: points[index].lat,
+          lon: points[index].lon,
+          displayMode: points[index].displayMode || 'UNKNOWN',
+          angle: meanAngle
         }});
         lastPlacedDistance = distanceAlong;
       }}
@@ -1451,34 +2082,42 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
     }}
 
     function buildModeSegments(points) {{
-      if (points.length === 0) {{
-        return [];
-      }}
+      // Android splitTrackByMode 相当。
+      // isStayAggregate 点でセグメントを切り、滞在点自体はポリラインに含めない。
+      if (points.length === 0) return [];
       const segments = [];
-      let currentMode = points[0].displayMode || 'UNKNOWN';
-      let currentSegment = [points[0]];
-      for (let index = 1; index < points.length; index += 1) {{
+      let currentMode = null;
+      let currentSegment = [];
+
+      function flush() {{
+        if (currentSegment.length >= 2) {{
+          segments.push({{ mode: currentMode, points: currentSegment }});
+        }}
+        currentSegment = [];
+        currentMode = null;
+      }}
+
+      for (let index = 0; index < points.length; index++) {{
         const point = points[index];
+        if (point.isStayAggregate) {{
+          flush();
+          continue; // 滞在点はポリラインに含めない（stop marker として別途描画）
+        }}
         const pointMode = point.displayMode || 'UNKNOWN';
-        if (pointMode !== currentMode) {{
-          if (currentSegment.length >= 2) {{
-            segments.push({{
-              mode: currentMode,
-              points: currentSegment
-            }});
-          }}
-          currentSegment = [points[index - 1], point];
+        if (currentMode === null) {{
           currentMode = pointMode;
+          currentSegment = [point];
+        }} else if (pointMode !== currentMode) {{
+          // モード切り替え：Android 同様に前セグメント末尾点をブリッジとして新セグメントへ
+          const bridge = currentSegment[currentSegment.length - 1];
+          flush();
+          currentMode = pointMode;
+          currentSegment = [bridge, point];
         }} else {{
           currentSegment.push(point);
         }}
       }}
-      if (currentSegment.length >= 2) {{
-        segments.push({{
-          mode: currentMode,
-          points: currentSegment
-        }});
-      }}
+      flush();
       return segments;
     }}
 
@@ -1489,6 +2128,90 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
         lat: latSum / points.length,
         lon: lonSum / points.length
       }};
+    }}
+
+    function collapseConstantRegions(points) {{
+      if (points.length === 0) return [];
+      console.log(`[Collapse] UI analysis starting for ${{points.length}} points...`);
+
+      const isStationaryMode = (m) => {{
+        const sm = (m || '').toUpperCase().trim();
+        return sm === 'DEVICE_STILL' || sm === 'STOPPED';
+      }};
+      const isStayKind = (k) => {{
+        const sk = (k || '').toUpperCase().trim();
+        return sk.includes('STAY');
+      }};
+      const isNoneKind = (k) => {{
+        const sk = (k || '').toUpperCase().trim();
+        return !sk || sk === 'NONE' || sk === 'NULL';
+      }};
+
+      const collapsed = [];
+      let index = 0;
+      let deviceStillSegments = 0;
+      let stoppedSegments = 0;
+
+      while (index < points.length) {{
+        const point = points[index];
+        const kind = point.constantRegionKind;
+        const mode = point.displayMode;
+
+        // Android collapseConstantRegions に準拠:
+        // constantRegionKind が STAY の点のみ集約する。
+        // DEVICE_STILL/STOPPED モードでも kind が null/NONE なら通常の点として通過させる。
+        const shouldCollapseAsStay = isStayKind(kind);
+
+        if (!shouldCollapseAsStay && isNoneKind(kind)) {{
+          collapsed.push(point);
+          index += 1;
+          continue;
+        }}
+
+        let endExclusive = index + 1;
+        if (shouldCollapseAsStay) {{
+          // STAY kind が続く間を一括集約
+          while (endExclusive < points.length) {{
+            const nextP = points[endExclusive];
+            const nextKind = nextP.constantRegionKind;
+            if (!isStayKind(nextKind)) break;
+            endExclusive += 1;
+          }}
+
+          const segment = points.slice(index, endExclusive);
+          const lastPoint = segment[segment.length - 1];
+
+          let latSum = 0, lonSum = 0;
+          segment.forEach(p => {{ latSum += p.lat; lonSum += p.lon; }});
+          const lat = lastPoint.constantRegionStayLat ?? (latSum / segment.length);
+          const lon = lastPoint.constantRegionStayLon ?? (lonSum / segment.length);
+
+          collapsed.push({{
+            ...lastPoint,
+            lat, lon,
+            isStayAggregate: true,
+            displayMode: lastPoint.displayMode
+          }});
+
+          if (segment.some(p => p.displayMode === 'DEVICE_STILL')) deviceStillSegments++;
+          else stoppedSegments++;
+
+          console.log(`[Collapse] Aggregate STAY: points=${{segment.length}}, lat=${{lat.toFixed(6)}}`);
+        }} else if (kind === 'CONSTANT_MOVE') {{
+          while (endExclusive < points.length && points[endExclusive].constantRegionKind === kind) {{
+            endExclusive += 1;
+          }}
+          const segment = points.slice(index, endExclusive);
+          collapsed.push(...segment);
+        }} else {{
+          collapsed.push(point);
+          endExclusive = index + 1;
+        }}
+        index = endExclusive;
+      }}
+
+      window._latestStats = {{ deviceStillSegments, stoppedSegments }};
+      return collapsed;
     }}
 
     function median(values) {{
@@ -2115,7 +2838,9 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
         }}
       }}
       return {{
-        points: normalized,
+        points: collapseConstantRegions(normalized),
+        deviationPoints: normalized,
+
         stats: {{
           deviceStillSegments,
           stoppedSegments,
@@ -2183,190 +2908,260 @@ def render_dashboard_html(payload_json: str, title: str) -> str:
       if (mapStartMarker) map.removeLayer(mapStartMarker);
       if (mapLatestMarker) map.removeLayer(mapLatestMarker);
       mapDirectionLayer.clearLayers();
+      mapStateLabelLayer.clearLayers();
+      mapTrkLabelLayer.clearLayers();
 
-      const stopNormalizationResult = modeKey === 'corrected'
-        ? normalizeStopsForDisplay(
-            mode.gpsPoints,
-            APP_DEVICE_STILL_WINDOW_COUNT,
-            APP_STOPPED_WINDOW_COUNT
-          )
-        : {{
-            points: mode.gpsPoints,
-            stats: {{
-              deviceStillSegments: 0,
-              stoppedSegments: 0,
-              returnBurstPoints: 0,
-              returnBurstSegments: 0,
-              clusterHopPoints: 0,
-              clusterHopSegments: 0,
-              burstPoints: 0,
-              burstSegments: 0,
-              compressedPoints: 0,
-              outlierPoints: 0,
-              softenedPoints: 0,
-              changedPoints: 0,
-              averageShiftM: 0,
-              maxShiftM: 0
-            }}
-          }};
-      renderStopNormalizationStatus(modeKey, stopNormalizationResult.stats);
-      const stopNormalizedPoints = stopNormalizationResult.points;
-      updateStopDeviationChart(mode.gpsPoints, stopNormalizedPoints);
-      const displayPointsSource = modeKey === 'corrected'
-        ? smoothGpsPoints(stopNormalizedPoints)
-        : stopNormalizedPoints;
-      const mapPointsSource = filterMapPointsByFocus(displayPointsSource);
-      const points = mapPointsSource.map((point) => [point.lat, point.lon]);
-      if (points.length > 0) {{
-        const latLngBounds = L.latLngBounds(points);
-        buildModeSegments(mapPointsSource).forEach((segment) => {{
-          L.polyline(
-            segment.points.map((point) => [point.lat, point.lon]),
-            {{
-              color: modeColors[segment.mode] || modeColors.UNKNOWN,
-              weight: 4,
-              opacity: 0.82
-            }}
-          ).addTo(mapPolylineLayer);
-        }});
-        map.fitBounds(latLngBounds, {{ padding: [18, 18] }});
-
-        computeDirectionArrowMarkers(mapPointsSource).forEach((marker) => {{
-          L.marker([marker.lat, marker.lon], {{
-            interactive: false,
-            keyboard: false,
-            icon: L.divIcon({{
-              className: '',
-              html: `<div class="direction-arrow" style="color: ${{modeColors[marker.displayMode] || modeColors.UNKNOWN}}; transform: rotate(${{marker.angle}}deg);">&gt;</div>`,
-              iconSize: [18, 18],
-              iconAnchor: [9, 9]
-            }})
-          }}).addTo(mapDirectionLayer);
-        }});
-
-        const first = mapPointsSource[0];
-        const last = mapPointsSource[mapPointsSource.length - 1];
-        mapStartMarker = L.marker([first.lat, first.lon]).addTo(map).bindPopup(`Start<br>${{first.dt}}`);
-        mapLatestMarker = L.marker([last.lat, last.lon]).addTo(map).bindPopup(`Latest<br>${{last.dt}}`);
+      if (modeKey === 'corrected') {{
+        stopNormalizationStatus.textContent = '停止標準化: ON（Android地図準拠表示）';
       }} else {{
-        map.setView([35.0, 135.0], 5);
+        stopNormalizationStatus.textContent = '停止標準化: OFF（補正なし表示）';
       }}
-    }}
 
-    function applyMode(modeKey) {{
-      renderSummary(modeKey);
-      updateCharts(modeKey);
-      updateMap(modeKey);
-      renderEvents();
-    }}
-
-    function renderEvents() {{
-      const events = getCurrentEvents();
-      eventList.innerHTML = '';
-      if (events.length === 0) {{
-        const item = document.createElement('li');
-        item.textContent = 'この日付のイベントコメントはありません。';
-        eventList.appendChild(item);
+      // Android アプリ地図 — モード別カラー・方向矢印・ラベル
+      const rawGpsPoints = mode.gpsPoints;
+      if (!rawGpsPoints || rawGpsPoints.length === 0) {{
+        renderStopNormalizationStatus(modeKey, null);
         return;
       }}
-      events.slice().reverse().forEach((event) => {{
-        const item = document.createElement('li');
-        item.innerHTML = `<strong>${{event.dt}}</strong>${{event.message}}`;
-        eventList.appendChild(item);
+
+      let displayPoints;
+      let deviationPoints = rawGpsPoints;
+      if (modeKey === 'corrected') {{
+        const normResult = normalizeStopsForDisplay(
+          rawGpsPoints,
+          APP_DEVICE_STILL_WINDOW_COUNT,
+          APP_STOPPED_WINDOW_COUNT
+        );
+        renderStopNormalizationStatus(modeKey, normResult.stats);
+        displayPoints = normResult.points;
+        deviationPoints = normResult.deviationPoints;
+      }} else {{
+        displayPoints = collapseConstantRegions(rawGpsPoints);
+        renderStopNormalizationStatus(modeKey, null);
+      }}
+
+      updateStopDeviationChart(rawGpsPoints, deviationPoints);
+
+      const focusedPoints = filterMapPointsByFocus(displayPoints);
+      if (focusedPoints.length === 0) return;
+
+      // 地図境界フィット
+      const allLats = focusedPoints.map((p) => p.lat);
+      const allLons = focusedPoints.map((p) => p.lon);
+      map.fitBounds(
+        L.latLngBounds(
+          [Math.min(...allLats), Math.min(...allLons)],
+          [Math.max(...allLats), Math.max(...allLons)]
+        ),
+        {{ padding: [32, 32] }}
+      );
+
+      const smoothed = smoothGpsPoints(focusedPoints);
+
+      // モード別ポリライン（Android splineMovingTrack + splitTrackByMode 相当）
+      const segments = buildModeSegments(smoothed);
+      segments.forEach((segment) => {{
+        const color = modeColors[segment.mode] || modeColors.UNKNOWN;
+        const weight = segment.mode === 'WALKING' ? 3 : 4;
+        const opacity = segment.mode === 'DEVICE_STILL' ? 0.65 : 0.88;
+        const drawPoints = splineSegmentPoints(segment.points, 5);
+        L.polyline(drawPoints.map((p) => [p.lat, p.lon]), {{
+          color, weight, opacity
+        }}).addTo(mapPolylineLayer);
+      }});
+
+      // 滞在点マーカー（isStayAggregate 点をグレー丸で表示）
+      smoothed.forEach((p) => {{
+        if (!p.isStayAggregate) return;
+        L.circleMarker([p.lat, p.lon], {{
+          radius: 6.5,
+          color: '#888888',
+          fillColor: '#888888',
+          fillOpacity: 0.55,
+          weight: 2,
+          opacity: 0.85
+        }}).addTo(mapPolylineLayer);
+      }});
+
+      // 方向矢印マーカー（Android computeDirectionArrowMarkersOnScreen() に対応）
+      const arrowMarkers = computeDirectionArrowMarkersOnScreen(smoothed);
+      arrowMarkers.forEach((marker) => {{
+        const color = modeColors[marker.displayMode] || modeColors.UNKNOWN;
+        L.marker([marker.lat, marker.lon], {{
+          interactive: false,
+          keyboard: false,
+          icon: L.divIcon({{
+            className: '',
+            html: `<div class="direction-arrow" style="color:${{color}};transform:rotate(${{marker.angle}}deg);">&#x276F;</div>`,
+            iconSize: [44, 44],
+            iconAnchor: [22, 22]
+          }})
+        }}).addTo(mapDirectionLayer);
+      }});
+
+      // スタートマーカー（赤中空丸）
+      const firstPt = focusedPoints[0];
+      mapStartMarker = L.marker([firstPt.lat, firstPt.lon], {{
+        icon: L.divIcon({{
+          className: '',
+          html: '<div class="ring-marker start"></div>',
+          iconSize: [20, 20],
+          iconAnchor: [10, 10]
+        }})
+      }}).addTo(map);
+
+      // 最新点マーカー（青中空丸）
+      const lastPt = focusedPoints[focusedPoints.length - 1];
+      mapLatestMarker = L.marker([lastPt.lat, lastPt.lon], {{
+        icon: L.divIcon({{
+          className: '',
+          html: '<div class="ring-marker current"></div>',
+          iconSize: [20, 20],
+          iconAnchor: [10, 10]
+        }})
+      }}).addTo(map);
+
+      // K/W ラベルレイヤー（チェックボックスで制御）
+      if (showStateLabelsCheckbox.checked) {{
+        renderLabelLayer(mapStateLabelLayer, mode.stateLabels || []);
+      }}
+
+      // trK ラベルレイヤー（チェックボックスで制御）
+      if (showTrkLabelsCheckbox.checked) {{
+        renderLabelLayer(mapTrkLabelLayer, mode.trkLabels || []);
+      }}
+
+    }}
+
+    function updateEventList() {{
+      const events = getCurrentEvents();
+      const eventList = document.getElementById('eventList');
+      eventList.innerHTML = '';
+      [...events].reverse().forEach((event) => {{
+        const li = document.createElement('li');
+        li.innerHTML = `<strong>${{event.dt}}</strong> ${{event.message}}`;
+        eventList.appendChild(li);
       }});
     }}
 
-    dateKeySelect.addEventListener('change', () => {{
-      applyMode(correctionSelect.value);
-    }});
-    correctionSelect.addEventListener('change', (event) => {{
-      applyMode(event.target.value);
-    }});
-    stopDeviationFocusSelect.addEventListener('change', () => {{
-      applyDeviationFocus();
-      updateMap(correctionSelect.value);
-    }});
-    stopDeviationWindowMinutesSelect.addEventListener('change', () => {{
-      applyDeviationFocus();
-      updateMap(correctionSelect.value);
-    }});
+    function renderAll() {{
+      const modeKey = correctionSelect.value;
+      renderSummary(modeKey);
+      updateCharts(modeKey);
+      updateMap(modeKey);
+      updateEventList();
+    }}
+
+    // ---- イベントリスナー ----
+    dateKeySelect.addEventListener('change', renderAll);
+    correctionSelect.addEventListener('change', renderAll);
+
     mapTimeFocusSelect.addEventListener('change', () => {{
       updateMap(correctionSelect.value);
     }});
 
-    const eventList = document.getElementById('eventList');
-    applyMode(payload.initialCorrection);
+    stopDeviationFocusSelect.addEventListener('change', applyDeviationFocus);
+
+    stopDeviationWindowMinutesSelect.addEventListener('change', () => {{
+      applyDeviationFocus();
+      if (mapTimeFocusSelect.value === 'focus') {{
+        updateMap(correctionSelect.value);
+      }}
+    }});
+
+    showStateLabelsCheckbox.addEventListener('change', () => {{
+      const modeData = getCurrentModeData(correctionSelect.value);
+      mapStateLabelLayer.clearLayers();
+      if (showStateLabelsCheckbox.checked) {{
+        renderLabelLayer(mapStateLabelLayer, modeData.stateLabels || []);
+      }}
+    }});
+
+    showTrkLabelsCheckbox.addEventListener('change', () => {{
+      const modeData = getCurrentModeData(correctionSelect.value);
+      mapTrkLabelLayer.clearLayers();
+      if (showTrkLabelsCheckbox.checked) {{
+        renderLabelLayer(mapTrkLabelLayer, modeData.trkLabels || []);
+      }}
+    }});
+
+    // 初期描画
+    renderAll();
   </script>
 </body>
 </html>
 """
 
 
-def write_dashboard(mode_data, events_by_date, summary, html_output: Path, open_browser: bool, initial_correction: str, date_keys, initial_date_key):
-    payload_json = build_dashboard_payload(
-        mode_data,
-        events_by_date,
-        summary,
-        initial_correction,
-        date_keys,
-        initial_date_key,
-    )
-    html = render_dashboard_html(payload_json, f"GpsPressureLogger Dashboard: {html_output.stem}")
-    html_output.write_text(html, encoding="utf-8")
-    print(f"Dashboard saved to {html_output}")
-    if open_browser:
-        webbrowser.open("file://" + os.path.realpath(html_output))
-
-
 def build_dashboard(
-    csv_path_arg: str | None = None,
-    html_output: str = DEFAULT_HTML,
     *,
+    csv_path_arg: str | None = None,
+    motion_csv_path_arg: str | None = None,
+    html_output: str = DEFAULT_HTML,
     view: str = "latest-session",
     session_gap_minutes: int = DEFAULT_SESSION_GAP_MINUTES,
     correction: str = "corrected",
+    selected_date_key: str | None = None,
+    tile_url_template: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
     summary_only: bool = False,
     open_browser: bool = False,
-):
+) -> dict:
+    """デスクトップアプリおよびコマンドライン共通のダッシュボード生成エントリポイント。
+
+    Returns:
+        html_path: 書き出した HTML ファイルのパス文字列
+        csv_path: 使用した CSV ファイルのパス文字列
+        summary: summarize_rows() の返り値（first / last / motion_source_file を含む）
+        date_keys: 日付キーのリスト（"all" を先頭に含む）
+        available_date_keys: date_keys の別名（互換性）
+        initial_date_key: 初期選択の日付キー
+    """
     csv_path = resolve_csv_path(csv_path_arg)
-    print(f"Loading {csv_path}...")
     if not csv_path.exists():
-        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        raise FileNotFoundError(f"CSV not found: {csv_path}")
 
     rows, events = load_backup(csv_path)
-    if not rows:
-        raise ValueError("No data rows found in CSV.")
-    rows = assign_display_modes(rows, events)
+
+    motion_csv_path_resolved = resolve_motion_csv_path(csv_path, motion_csv_path_arg)
+    motion_samples, used_motion_path = load_motion_samples(motion_csv_path_resolved)
+    rows = assign_display_modes(rows, events, motion_samples)
 
     session_info = None
     if view == "latest-session":
         rows, events, session_info = filter_latest_session(rows, events, session_gap_minutes)
 
-    summary = summarize_rows(rows, events, csv_path, session_info=session_info)
-    mode_data, events_by_date, date_keys = build_mode_data_by_date(rows, events)
-    initial_date_key = date_keys[-1] if date_keys else "all"
-    print_summary(summary, events_by_date.get(initial_date_key, []), mode_data, correction, initial_date_key)
+    summary = summarize_rows(rows, events, csv_path, used_motion_path, session_info)
 
-    html_path = Path(html_output)
-    if not summary_only:
-        write_dashboard(
-            mode_data,
-            events_by_date,
-            summary,
-            html_path,
-            open_browser=open_browser,
-            initial_correction=correction,
-            date_keys=date_keys,
-            initial_date_key=initial_date_key,
-        )
+    mode_data, events_by_date, date_keys = build_mode_data_by_date(rows, events, motion_samples)
+
+    if selected_date_key and selected_date_key in date_keys:
+        initial_date_key = selected_date_key
+    elif len(date_keys) > 1:
+        # date_keys = ["all", "2025-xx-xx", ...] — 末尾が最新日
+        initial_date_key = date_keys[-1]
+    else:
+        initial_date_key = date_keys[0] if date_keys else "all"
+
+    payload_json = build_dashboard_payload(
+        mode_data, events_by_date, summary, correction, date_keys, initial_date_key
+    )
+
+    title = f"GPS Pressure Logger \u2013 {csv_path.name}"
+    html = render_dashboard_html(payload_json, title, tile_url_template)
+
+    output_path = Path(html_output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html, encoding="utf-8")
+
+    if open_browser:
+        webbrowser.open(output_path.as_uri())
 
     return {
-        "csv_path": csv_path,
-        "html_path": html_path,
+        "html_path": str(output_path),
+        "csv_path": str(csv_path),
         "summary": summary,
-        "mode_data": mode_data,
-        "events_by_date": events_by_date,
         "date_keys": date_keys,
+        "available_date_keys": date_keys,
         "initial_date_key": initial_date_key,
     }
 
@@ -2374,8 +3169,9 @@ def build_dashboard(
 def main():
     args = parse_args()
     try:
-        build_dashboard(
+        result = build_dashboard(
             csv_path_arg=args.csv_path,
+            motion_csv_path_arg=args.motion_csv_path,
             html_output=args.html_output,
             view=args.view,
             session_gap_minutes=args.session_gap_minutes,
@@ -2383,9 +3179,9 @@ def main():
             summary_only=args.summary_only,
             open_browser=not args.no_browser,
         )
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"Error: {exc}")
-        return
+        print(f"Output: {result['html_path']}")
+    except FileNotFoundError as exc:
+        print(exc)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -40,6 +41,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.withContext
 
 // 系列カラー
@@ -58,9 +60,36 @@ private const val GRAPH_DRAG_SENSITIVITY = 4f
 fun HomeScreen(
     onNavigateToMap: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    graphResetRequestId: Long = 0L,
     viewModel: HomeViewModel = viewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
+
+    LaunchedEffect(graphResetRequestId) {
+        if (graphResetRequestId > 0L) {
+            viewModel.resetGraphWindowToLatest()
+        }
+    }
+    LaunchedEffect(
+        uiState.isGraphLoaded,
+        uiState.history.size,
+        uiState.latestTimestampMs,
+        uiState.graphWindowEndMs,
+        uiState.graphLoadError
+    ) {
+        if (
+            uiState.isGraphLoaded &&
+            uiState.graphLoadError == null &&
+            uiState.history.size < 2 &&
+            uiState.latestTimestampMs != null
+        ) {
+            viewModel.recoverGraphWindowIfEmpty(
+                historySize = uiState.history.size,
+                latestTimestampMs = uiState.latestTimestampMs,
+                graphWindowEndMs = uiState.graphWindowEndMs
+            )
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -85,6 +114,7 @@ fun HomeScreen(
                         motionSamples = uiState.motionHistory,
                         lookbackMin = uiState.lookbackMin,
                         windowEndMs = uiState.graphWindowEndMs,
+                        onVisibleLookbackChanged = viewModel::updateGraphVisibleLookback,
                         onWindowShift = viewModel::shiftGraphWindowBy,
                         onResetWindow = viewModel::resetGraphWindowToLatest,
                         modifier = Modifier.fillMaxSize().padding(8.dp)
@@ -92,11 +122,40 @@ fun HomeScreen(
                 }
             } else {
                 Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = if (uiState.history.isEmpty()) "データを記録中...\n屋外で使用してください" else "データを記録中... ${uiState.history.size}件",
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    EmptyGraphMessage(
+                        uiState = uiState,
+                        onResetWindow = viewModel::resetGraphWindowToLatest
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyGraphMessage(
+    uiState: HomeUiState,
+    onResetWindow: () -> Unit
+) {
+    val message = when {
+        !uiState.isGraphLoaded -> "履歴を読み込み中..."
+        uiState.graphLoadError != null -> "履歴の読込に失敗しました"
+        uiState.latestTimestampMs == null -> "データを記録中...\n屋外で使用してください"
+        uiState.history.isEmpty() -> "表示範囲にデータがありません"
+        else -> "表示範囲のデータが不足しています (${uiState.history.size}件)"
+    }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (uiState.latestTimestampMs != null) {
+            Button(onClick = onResetWindow) {
+                Text("最新へ戻す")
             }
         }
     }
@@ -109,15 +168,18 @@ private fun CombinedChart(
     motionSamples: List<MotionSample>,
     lookbackMin: Int,
     windowEndMs: Long,
+    onVisibleLookbackChanged: (Long) -> Unit,
     onWindowShift: (Long, Long) -> Unit,
     onResetWindow: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val baseLookbackMs = lookbackMin * 60_000L.toLong()
-    val entriesAsc = remember(entries) { entries.sortedBy { it.timestamp } }
+    val entriesAsc = entries
     var zoomX by remember { mutableFloatStateOf(1f) }
     var canvasWidthPx by remember { mutableFloatStateOf(1f) }
+    var canvasHeightPx by remember { mutableFloatStateOf(1f) }
     var lastGestureLogMs by remember { mutableLongStateOf(0L) }
     var transientWindowEndMs by remember(windowEndMs) { mutableLongStateOf(windowEndMs) }
     var gestureActive by remember { mutableStateOf(false) }
@@ -134,6 +196,9 @@ private fun CombinedChart(
         if (!gestureActive) {
             transientWindowEndMs = windowEndMs
         }
+    }
+    LaunchedEffect(visibleLookbackMs) {
+        onVisibleLookbackChanged(visibleLookbackMs)
     }
 
     val dragState = rememberDraggableState { delta ->
@@ -172,26 +237,38 @@ private fun CombinedChart(
     val computedSeries by produceState<GraphUtil.ProcessedSeries?>(
         initialValue = null,
         entriesAsc,
-        motionSamples,
-        graphStartMs,
-        transientWindowEndMs
+        motionSamples
     ) {
-        value = withContext(Dispatchers.Default) {
-            GraphUtil.getProcessedSeriesForWindow(
-                entries = entriesAsc,
-                motionSamples = motionSamples,
-                intervalMs = 30_000L,
-                windowStartMs = graphStartMs,
-                windowEndMs = transientWindowEndMs
-            )
-        }
+        snapshotFlow { graphStartMs to transientWindowEndMs }
+            .conflate()
+            .collect { (windowStartMs, windowEndMsForSeries) ->
+                value = withContext(Dispatchers.Default) {
+                    GraphUtil.getProcessedSeriesForWindow(
+                        entries = entriesAsc,
+                        motionSamples = motionSamples,
+                        intervalMs = 30_000L,
+                        windowStartMs = windowStartMs,
+                        windowEndMs = windowEndMsForSeries
+                    )
+                }
+            }
     }
     LaunchedEffect(computedSeries) {
         if (computedSeries != null) {
             lastStableSeries = computedSeries
         }
     }
-    val d = computedSeries ?: lastStableSeries ?: return
+    val d = computedSeries ?: lastStableSeries
+    if (d == null) {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Text(
+                text = "グラフ計算中...",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        return
+    }
     val stepSeriesByMode = remember(d) {
         listOf(
             MovementDetector.Mode.DEVICE_STILL to modeColorDeviceStill,
@@ -215,11 +292,43 @@ private fun CombinedChart(
         if (axisRange > 12 * 3600_000L) SimpleDateFormat("MM/dd HH:mm", Locale.JAPAN)
         else SimpleDateFormat("HH:mm", Locale.JAPAN)
     }
+    val chartPaths = remember(
+        d,
+        stepSeriesByMode,
+        axisStartMs,
+        axisRange,
+        canvasWidthPx,
+        canvasHeightPx,
+        density
+    ) {
+        val padL = with(density) { 20.dp.toPx() }
+        val padR = with(density) { 20.dp.toPx() }
+        val padBot = with(density) { 20.dp.toPx() }
+        val plotW = (canvasWidthPx - padL - padR).coerceAtLeast(1f)
+        val plotH = (canvasHeightPx - padBot).coerceAtLeast(1f)
+        fun xOf(timestamp: Long) = padL + (timestamp - axisStartMs).toFloat() / axisRange * plotW
+        fun yOfP(v: Float) = GraphUtil.valueToYRatio(v, d.pMin, d.pMax, GraphUtil.PRES_TOP, GraphUtil.PRES_BOT) * canvasHeightPx
+        fun yOfA(v: Float) = GraphUtil.valueToYRatio(v, d.aMin, d.aMax, GraphUtil.ALT_TOP, GraphUtil.ALT_BOT) * canvasHeightPx
+        fun yOfS(v: Float) = GraphUtil.stepsToYRatio(v, d.sMax) * canvasHeightPx
+        ChartPaths(
+            stepPaths = stepSeriesByMode.map { (_, color, values) ->
+                color to buildStepPath(values, d.times, ::xOf, ::yOfS)
+            },
+            altitudePath = buildLinePath(d.alt, d.times, ::xOf, ::yOfA),
+            pressurePath = buildLinePath(d.pres, d.times, ::xOf, ::yOfP),
+            qnhPath = buildLinePath(d.qnh, d.times, ::xOf, ::yOfP),
+            plotTop = 0f,
+            plotLeft = padL,
+            plotRight = padL + plotW,
+            plotBottom = plotH
+        )
+    }
 
     Box(
         modifier = modifier
             .onSizeChanged {
                 canvasWidthPx = it.width.toFloat().coerceAtLeast(1f)
+                canvasHeightPx = it.height.toFloat().coerceAtLeast(1f)
                 ExportUtil.writeVerboseDebugLog(
                     context,
                     "GRAPH_SIZE: widthPx=${it.width} heightPx=${it.height} lookbackMin=$lookbackMin windowEndMs=$windowEndMs"
@@ -252,6 +361,20 @@ private fun CombinedChart(
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        TextButton(
+            onClick = onResetWindow,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .height(30.dp)
+        ) {
+            Text("最新", fontSize = 11.sp)
+        }
+        // Paint オブジェクトを Canvas 描画ごとに生成しないよう remember でキャッシュ
+        val labelSz = with(density) { 9.sp.toPx() }
+        val paintL = remember(labelSz) { android.graphics.Paint().apply { isAntiAlias = true; textSize = labelSz; color = GraphUtil.COLOR_PRES; textAlign = android.graphics.Paint.Align.RIGHT } }
+        val paintR = remember(labelSz) { android.graphics.Paint().apply { isAntiAlias = true; textSize = labelSz; color = GraphUtil.COLOR_ALT; textAlign = android.graphics.Paint.Align.LEFT } }
+        val paintS = remember(labelSz) { android.graphics.Paint().apply { isAntiAlias = true; textSize = labelSz; color = GraphUtil.COLOR_STEPS; textAlign = android.graphics.Paint.Align.LEFT } }
+        val paintX = remember(labelSz) { android.graphics.Paint().apply { isAntiAlias = true; textSize = labelSz; color = 0xB4B4B4B4.toInt(); textAlign = android.graphics.Paint.Align.CENTER } }
         Canvas(modifier = Modifier.fillMaxSize()) {
             val w = size.width; val h = size.height
             val padL = 20.dp.toPx(); val padR = 20.dp.toPx(); val padBot = 20.dp.toPx()
@@ -264,11 +387,7 @@ private fun CombinedChart(
             fun yOfA(v: Float) = GraphUtil.valueToYRatio(v, d.aMin, d.aMax, GraphUtil.ALT_TOP, GraphUtil.ALT_BOT) * h
             fun yOfS(v: Float) = (GraphUtil.stepsToYRatio(v, d.sMax) * h)
 
-            val labelSz = 9.sp.toPx(); val labelGap = 2.dp.toPx()
-            val paintL = android.graphics.Paint().apply { isAntiAlias = true; textSize = labelSz; color = GraphUtil.COLOR_PRES; textAlign = android.graphics.Paint.Align.RIGHT }
-            val paintR = android.graphics.Paint().apply { isAntiAlias = true; textSize = labelSz; color = GraphUtil.COLOR_ALT; textAlign = android.graphics.Paint.Align.LEFT }
-            val paintS = android.graphics.Paint().apply { isAntiAlias = true; textSize = labelSz; color = GraphUtil.COLOR_STEPS; textAlign = android.graphics.Paint.Align.LEFT }
-            val paintX = android.graphics.Paint().apply { isAntiAlias = true; textSize = labelSz; color = 0xB4B4B4B4.toInt(); textAlign = android.graphics.Paint.Align.CENTER }
+            val labelGap = 2.dp.toPx()
 
             // 左軸（気圧）
             listOf(d.pMax, d.pMin).forEach { v ->
@@ -317,40 +436,86 @@ private fun CombinedChart(
                 }
             }
 
-            clipRect(padL, 0f, padL + plotW, plotH) {
-                fun drawS(vals: List<Float?>, times: LongArray, yOf: (Float) -> Float, color: Color, width: Float, alpha: Float = 1f, isSteps: Boolean = false) {
-                    if (vals.isEmpty()) return
-                    val path = Path()
-                    var prevV = -1f
-                    var drawing = false
-                    vals.forEachIndexed { i, v ->
-                        val value = v
-                        if (value == null || !value.isFinite()) {
-                            drawing = false
-                            prevV = Float.NaN
-                            return@forEachIndexed
-                        }
-                        val x = padL + (times[i] - vTMin).toFloat() / vTRange * plotW
-                        val y = yOf(value)
-                        if (!drawing || (isSteps && prevV.isFinite() && value < prevV)) {
-                            path.moveTo(x, y)
-                            drawing = true
-                        } else {
-                            path.lineTo(x, y)
-                        }
-                        prevV = value
-                    }
-                    drawPath(path, color.copy(alpha = alpha), style = Stroke(width))
+            clipRect(chartPaths.plotLeft, chartPaths.plotTop, chartPaths.plotRight, chartPaths.plotBottom) {
+                chartPaths.stepPaths.forEach { (color, path) ->
+                    drawPath(path, color, style = Stroke(2.5f))
                 }
-                stepSeriesByMode.forEach { (_, color, values) ->
-                    drawS(values, d.times, ::yOfS, color, 2.5f, 1.0f, isSteps = true)
-                }
-                drawS(d.alt,   d.times, ::yOfA, colorAlt, 2.5f)
-                drawS(d.pres,  d.times, ::yOfP, colorPres, 2.5f)
-                drawS(d.qnh,   d.times, ::yOfP, colorQnh, 2.5f)
+                drawPath(chartPaths.altitudePath, colorAlt, style = Stroke(2.5f))
+                drawPath(chartPaths.pressurePath, colorPres, style = Stroke(2.5f))
+                drawPath(chartPaths.qnhPath, colorQnh, style = Stroke(2.5f))
             }
         }
     }
+}
+
+private data class ChartPaths(
+    val stepPaths: List<Pair<Color, Path>>,
+    val altitudePath: Path,
+    val pressurePath: Path,
+    val qnhPath: Path,
+    val plotTop: Float,
+    val plotLeft: Float,
+    val plotRight: Float,
+    val plotBottom: Float
+)
+
+private fun buildLinePath(
+    vals: List<Float>,
+    times: LongArray,
+    xOf: (Long) -> Float,
+    yOf: (Float) -> Float
+): Path {
+    val path = Path()
+    var drawing = false
+    vals.forEachIndexed { index, value ->
+        if (!value.isFinite()) {
+            drawing = false
+            return@forEachIndexed
+        }
+        val x = xOf(times[index])
+        val y = yOf(value)
+        if (!drawing) {
+            path.moveTo(x, y)
+            drawing = true
+        } else {
+            path.lineTo(x, y)
+        }
+    }
+    return path
+}
+
+private fun buildStepPath(
+    vals: List<Float?>,
+    times: LongArray,
+    xOf: (Long) -> Float,
+    yOf: (Float) -> Float
+): Path {
+    val path = Path()
+    var drawing = false
+    var previousValue = Float.NaN
+    var previousY = Float.NaN
+    vals.forEachIndexed { index, rawValue ->
+        val value = rawValue
+        if (value == null || !value.isFinite()) {
+            drawing = false
+            previousValue = Float.NaN
+            previousY = Float.NaN
+            return@forEachIndexed
+        }
+        val x = xOf(times[index])
+        val y = yOf(value)
+        if (!drawing || (previousValue.isFinite() && value < previousValue)) {
+            path.moveTo(x, y)
+            drawing = true
+        } else {
+            // 歩数は累積離散値なので、斜め補間せず水平線 + 垂直線で増分を表す。
+            path.lineTo(x, previousY)
+            path.lineTo(x, y)
+        }
+        previousValue = value
+        previousY = y
+    }
+    return path
 }
 
 @Composable

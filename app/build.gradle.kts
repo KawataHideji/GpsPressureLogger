@@ -3,8 +3,12 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
-    alias(libs.plugins.hilt)
 }
+
+// Android Studio / IntelliJ が古い Kotlin sync 経路で要求する互換タスク。
+// 現行ビルドでは不要だが、IDE が `:app:prepareKotlinBuildScriptModel` を
+// 呼んだ場合に sync だけ落ちるのを防ぐために残す。
+tasks.register("prepareKotlinBuildScriptModel")
 
 android {
     namespace = "com.example.gpspressurelogger"
@@ -62,11 +66,6 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
 
-    // Hilt
-    implementation(libs.hilt.android)
-    ksp(libs.hilt.compiler)
-    implementation(libs.hilt.navigation.compose)
-
     // Location (GPS)
     implementation(libs.play.services.location)
 
@@ -90,4 +89,7 @@ dependencies {
     // Widget (Glance)
     implementation(libs.androidx.glance.appwidget)
     implementation(libs.androidx.glance.material3)
+
+    // Unit Test
+    testImplementation(libs.junit)
 }

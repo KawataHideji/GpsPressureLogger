@@ -24,6 +24,24 @@ import java.util.zip.GZIPInputStream
 object ExportUtil {
     private val debugScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // verboseDebugLog の有効フラグをキャッシュ（DataStore を毎回読まない）
+    @Volatile private var verboseLogEnabled = false
+    @Volatile private var verboseSettingsInitialized = false
+
+    private fun ensureVerboseSettingsInit(context: Context) {
+        if (verboseSettingsInitialized) return
+        synchronized(this) {
+            if (verboseSettingsInitialized) return
+            val settings = SettingsRepository(context.applicationContext)
+            debugScope.launch {
+                settings.verboseDebugLogEnabled.collect { enabled ->
+                    verboseLogEnabled = enabled
+                }
+            }
+            verboseSettingsInitialized = true
+        }
+    }
+
     private const val ROOT_DIR = "GpsPressureLogger"
     private const val LOGS_DIR = "logs"
     private const val METRICS_DIR = "metrics"
@@ -36,8 +54,14 @@ object ExportUtil {
     private const val LEGACY_MOTION_SAMPLE_CSV_HEADER = "Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s"
     private const val PREVIOUS_MOTION_SAMPLE_CSV_HEADER =
         "Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAvg,KVariance,KConfidence,WStatus,StepDeltaWindow,GpsIntervalMs,GpsImmediate,ConfirmedMode,ConstantRegionKind,ConstantRegionSpeedKmh"
-    private const val MOTION_SAMPLE_CSV_HEADER =
+    private const val PREVIOUS_REGION_MOTION_SAMPLE_CSV_HEADER =
         "Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAvg,KVariance,KConfidence,WStatus,StepDeltaWindow,GpsIntervalMs,GpsImmediate,ConfirmedMode,ConstantRegionKind,ConstantRegionSpeedKmh,ConstantRegionStartLat,ConstantRegionStartLon,ConstantRegionEndLat,ConstantRegionEndLon,ConstantRegionStayLat,ConstantRegionStayLon,ConstantRegionDirectionDeg"
+    private const val PREVIOUS_ACCEL_SOURCE_MOTION_SAMPLE_CSV_HEADER =
+        "Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAvg,KVariance,KConfidence,WStatus,StepDeltaWindow,GpsIntervalMs,GpsImmediate,ConfirmedMode,ConstantRegionKind,ConstantRegionSpeedKmh,ConstantRegionStartLat,ConstantRegionStartLon,ConstantRegionEndLat,ConstantRegionEndLon,ConstantRegionStayLat,ConstantRegionStayLon,ConstantRegionDirectionDeg,KAccelSource"
+    private const val PREVIOUS_DETAILED_MOTION_SAMPLE_CSV_HEADER =
+        "Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAvg,KScalarAvg,KDirectionalityRatio,KVariance,KMaxMagnitude,KConfidence,KAccelSource,TrKStatus,TrKRawStatus,TrKAvg,TrKScalarAvg,TrKDirectionalityRatio,TrKMaxMagnitude,TrKHorizontalMaxMagnitude,TrKConfidence,TrKAccelSource,WStatus,StepDeltaWindow,GpsIntervalMs,GpsImmediate,ConfirmedMode,ConstantRegionKind,ConstantRegionSpeedKmh,ConstantRegionStartLat,ConstantRegionStartLon,ConstantRegionEndLat,ConstantRegionEndLon,ConstantRegionStayLat,ConstantRegionStayLon,ConstantRegionDirectionDeg"
+    private const val MOTION_SAMPLE_CSV_HEADER =
+        "Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAvg,KScalarAvg,KDirectionalityRatio,KVariance,TrKStatus,TrKRawStatus,TrKAvg,TrKDirectionalityRatio,WStatus,StepDeltaWindow,GpsIntervalMs,GpsImmediate,ConfirmedMode,ConstantRegionKind,ConstantRegionSpeedKmh,ConstantRegionStartLat,ConstantRegionStartLon,ConstantRegionEndLat,ConstantRegionEndLon,ConstantRegionStayLat,ConstantRegionStayLon,ConstantRegionDirectionDeg"
     private const val DAILY_LOG_PREFIX = "gps_log"
     private const val DAILY_MOTION_LOG_PREFIX = "motion_metrics"
     private const val DEBUG_LOG_FILE_NAME = "debug_log.txt"
@@ -97,8 +121,13 @@ object ExportUtil {
             csvValue(sample.kStatus),
             csvValue(sample.kRawStatus),
             csvValue(sample.kAvg),
+            csvValue(sample.kScalarAvg),
+            csvValue(sample.kDirectionalityRatio),
             csvValue(sample.kVariance),
-            csvValue(sample.kConfidence),
+            csvValue(sample.trKStatus),
+            csvValue(sample.trKRawStatus),
+            csvValue(sample.trKAvg),
+            csvValue(sample.trKDirectionalityRatio),
             csvValue(sample.wStatus),
             csvValue(sample.stepDeltaWindow),
             csvValue(sample.gpsIntervalMs),
@@ -425,12 +454,54 @@ object ExportUtil {
         }
     }
 
+    private fun rewriteMotionSamplesInFile(file: File, samples: List<MotionSample>) {
+        if (!file.exists() || samples.isEmpty()) return
+        ensureMotionSampleHeader(file)
+
+        val replacements = samples.associateBy { it.timestamp }
+        val written = mutableSetOf<Long>()
+        val lines = file.readLines()
+        val headerIndex = lines.indexOfFirst { !isCommentOrBlankCsvLine(it) }
+        if (headerIndex < 0) return
+
+        val rewritten = mutableListOf<String>()
+        lines.forEachIndexed { index, line ->
+            if (index <= headerIndex || isCommentOrBlankCsvLine(line)) {
+                rewritten += line
+                return@forEachIndexed
+            }
+
+            val timestamp = line.substringBefore(",").toLongOrNull()
+            val replacement = timestamp?.let { replacements[it] }
+            if (timestamp != null && replacement != null) {
+                if (written.add(timestamp)) {
+                    rewritten += motionSampleCsvRow(replacement)
+                }
+            } else {
+                rewritten += line
+            }
+        }
+
+        samples.sortedBy { it.timestamp }.forEach { sample ->
+            if (written.add(sample.timestamp)) {
+                rewritten += motionSampleCsvRow(sample)
+            }
+        }
+        file.writeText(rewritten.joinToString("\n") + "\n")
+    }
+
     private fun ensureMotionSampleHeader(file: File) {
         val lines = file.readLines()
         val headerIndex = lines.indexOfFirst { !isCommentOrBlankCsvLine(it) }
         if (headerIndex < 0) return
         val header = lines[headerIndex].split(",").map { cleanHeader(it) }.joinToString(",")
-        if (header != LEGACY_MOTION_SAMPLE_CSV_HEADER && header != PREVIOUS_MOTION_SAMPLE_CSV_HEADER) return
+        if (
+            header != LEGACY_MOTION_SAMPLE_CSV_HEADER &&
+            header != PREVIOUS_MOTION_SAMPLE_CSV_HEADER &&
+            header != PREVIOUS_REGION_MOTION_SAMPLE_CSV_HEADER &&
+            header != PREVIOUS_ACCEL_SOURCE_MOTION_SAMPLE_CSV_HEADER &&
+            header != PREVIOUS_DETAILED_MOTION_SAMPLE_CSV_HEADER
+        ) return
         val updated = lines.toMutableList()
         updated[headerIndex] = MOTION_SAMPLE_CSV_HEADER
         file.writeText(updated.joinToString("\n") + "\n")
@@ -454,13 +525,22 @@ object ExportUtil {
     }
 
     fun writeEntriesToUri(context: Context, fileUri: Uri, entries: List<LogEntry>): Boolean {
-        try {
+        val sortedEntries = entries.sortedBy { it.timestamp }
+        return try {
             flushPendingCsvQueues(context)
-            context.contentResolver.openOutputStream(fileUri)?.use { out ->
+            val outputStream = context.contentResolver.openOutputStream(fileUri)
+            if (outputStream == null) {
+                writeLocalDebugLog(
+                    context,
+                    "EXPORT_STANDARD_FAILED uri=$fileUri reason=openOutputStreamReturnedNull rows=${sortedEntries.size}"
+                )
+                deleteUriQuietly(context, fileUri)
+                return false
+            }
+            outputStream.use { out ->
                 BufferedWriter(OutputStreamWriter(out)).use { writer ->
                     writeCsvComment(writer, "GpsPressureLogger standard backup")
                     writer.write("$STANDARD_CSV_HEADER\n")
-                    val sortedEntries = entries.sortedBy { it.timestamp }
                     val comments = collectDailyCsvEventComments(context)
                     var commentIndex = 0
                     sortedEntries.forEach { e ->
@@ -479,18 +559,48 @@ object ExportUtil {
                     writer.flush()
                 }
             }
-            return true
-        } catch (e: Exception) { return false }
+            val exportedSize = exportedDocumentSize(context, fileUri)
+            if (exportedSize <= 0L) {
+                writeLocalDebugLog(
+                    context,
+                    "EXPORT_STANDARD_FAILED uri=$fileUri reason=emptyDocument rows=${sortedEntries.size} size=$exportedSize"
+                )
+                deleteUriQuietly(context, fileUri)
+                return false
+            }
+            writeLocalDebugLog(
+                context,
+                "EXPORT_STANDARD_OK uri=$fileUri rows=${sortedEntries.size} size=$exportedSize"
+            )
+            true
+        } catch (e: Exception) {
+            writeLocalDebugLog(
+                context,
+                "EXPORT_STANDARD_FAILED uri=$fileUri reason=${e.javaClass.simpleName}:${e.message ?: "unknown"} rows=${sortedEntries.size}"
+            )
+            deleteUriQuietly(context, fileUri)
+            false
+        }
     }
 
     fun writeMotionSamplesToUri(context: Context, fileUri: Uri, samples: List<MotionSample>): Boolean {
-        try {
+        val sortedSamples = samples.sortedBy { it.timestamp }
+        return try {
             flushPendingCsvQueues(context)
-            context.contentResolver.openOutputStream(fileUri)?.use { out ->
+            val outputStream = context.contentResolver.openOutputStream(fileUri)
+            if (outputStream == null) {
+                writeLocalDebugLog(
+                    context,
+                    "EXPORT_MOTION_FAILED uri=$fileUri reason=openOutputStreamReturnedNull rows=${sortedSamples.size}"
+                )
+                deleteUriQuietly(context, fileUri)
+                return false
+            }
+            outputStream.use { out ->
                 BufferedWriter(OutputStreamWriter(out)).use { writer ->
                     writeCsvComment(writer, "GpsPressureLogger motion metrics backup")
                     writer.write("$MOTION_SAMPLE_CSV_HEADER\n")
-                    samples.sortedBy { it.timestamp }.forEach { sample ->
+                    sortedSamples.forEach { sample ->
                         writer.write(
                             motionSampleCsvRow(sample) + "\n"
                         )
@@ -498,9 +608,46 @@ object ExportUtil {
                     writer.flush()
                 }
             }
-            return true
+            val exportedSize = exportedDocumentSize(context, fileUri)
+            if (exportedSize <= 0L) {
+                writeLocalDebugLog(
+                    context,
+                    "EXPORT_MOTION_FAILED uri=$fileUri reason=emptyDocument rows=${sortedSamples.size} size=$exportedSize"
+                )
+                deleteUriQuietly(context, fileUri)
+                return false
+            }
+            writeLocalDebugLog(
+                context,
+                "EXPORT_MOTION_OK uri=$fileUri rows=${sortedSamples.size} size=$exportedSize"
+            )
+            true
         } catch (e: Exception) {
-            return false
+            writeLocalDebugLog(
+                context,
+                "EXPORT_MOTION_FAILED uri=$fileUri reason=${e.javaClass.simpleName}:${e.message ?: "unknown"} rows=${sortedSamples.size}"
+            )
+            deleteUriQuietly(context, fileUri)
+            false
+        }
+    }
+
+    private fun deleteUriQuietly(context: Context, fileUri: Uri) {
+        try {
+            DocumentFile.fromSingleUri(context, fileUri)?.delete()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun exportedDocumentSize(context: Context, fileUri: Uri): Long {
+        return try {
+            context.contentResolver.openFileDescriptor(fileUri, "r")?.use { descriptor ->
+                val statSize = descriptor.statSize
+                if (statSize >= 0L) return statSize
+            }
+            DocumentFile.fromSingleUri(context, fileUri)?.length() ?: 0L
+        } catch (_: Exception) {
+            DocumentFile.fromSingleUri(context, fileUri)?.length() ?: 0L
         }
     }
 
@@ -631,8 +778,21 @@ object ExportUtil {
             kStatus = pick(existing.kStatus, incoming.kStatus),
             kRawStatus = pick(existing.kRawStatus, incoming.kRawStatus),
             kAvg = pick(existing.kAvg, incoming.kAvg),
+            kScalarAvg = pick(existing.kScalarAvg, incoming.kScalarAvg),
+            kDirectionalityRatio = pick(existing.kDirectionalityRatio, incoming.kDirectionalityRatio),
             kVariance = pick(existing.kVariance, incoming.kVariance),
+            kMaxMagnitude = pick(existing.kMaxMagnitude, incoming.kMaxMagnitude),
             kConfidence = pick(existing.kConfidence, incoming.kConfidence),
+            kAccelSource = pick(existing.kAccelSource, incoming.kAccelSource),
+            trKStatus = pick(existing.trKStatus, incoming.trKStatus),
+            trKRawStatus = pick(existing.trKRawStatus, incoming.trKRawStatus),
+            trKAvg = pick(existing.trKAvg, incoming.trKAvg),
+            trKScalarAvg = pick(existing.trKScalarAvg, incoming.trKScalarAvg),
+            trKDirectionalityRatio = pick(existing.trKDirectionalityRatio, incoming.trKDirectionalityRatio),
+            trKMaxMagnitude = pick(existing.trKMaxMagnitude, incoming.trKMaxMagnitude),
+            trKHorizontalMaxMagnitude = pick(existing.trKHorizontalMaxMagnitude, incoming.trKHorizontalMaxMagnitude),
+            trKConfidence = pick(existing.trKConfidence, incoming.trKConfidence),
+            trKAccelSource = pick(existing.trKAccelSource, incoming.trKAccelSource),
             wStatus = pick(existing.wStatus, incoming.wStatus),
             stepDeltaWindow = pick(existing.stepDeltaWindow, incoming.stepDeltaWindow),
             gpsIntervalMs = pick(existing.gpsIntervalMs, incoming.gpsIntervalMs),
@@ -767,10 +927,13 @@ object ExportUtil {
                 val rawHeader = headerLine.second
                 val header = rawHeader.split(",").map { cleanHeader(it) }
                 val headerText = header.joinToString(",")
-                val supportedHeader =
-                    headerText == MOTION_SAMPLE_CSV_HEADER ||
-                        headerText == PREVIOUS_MOTION_SAMPLE_CSV_HEADER ||
-                        headerText == LEGACY_MOTION_SAMPLE_CSV_HEADER
+            val supportedHeader =
+                headerText == MOTION_SAMPLE_CSV_HEADER ||
+                    headerText == PREVIOUS_DETAILED_MOTION_SAMPLE_CSV_HEADER ||
+                    headerText == PREVIOUS_MOTION_SAMPLE_CSV_HEADER ||
+                    headerText == PREVIOUS_REGION_MOTION_SAMPLE_CSV_HEADER ||
+                    headerText == PREVIOUS_ACCEL_SOURCE_MOTION_SAMPLE_CSV_HEADER ||
+                    headerText == LEGACY_MOTION_SAMPLE_CSV_HEADER
                 if (!supportedHeader) {
                     return ImportReport(0, 0, emptyList(), listOf(ImportIssue(fileName, lineNumber, "補助センサー判定ログ CSV ヘッダーではありません")))
                 }
@@ -783,8 +946,21 @@ object ExportUtil {
                 val iKStatus = indexOf("KStatus")
                 val iKRawStatus = indexOf("KRawStatus")
                 val iKAvg = indexOf("KAvg")
+                val iKScalarAvg = indexOf("KScalarAvg")
+                val iKDirectionalityRatio = indexOf("KDirectionalityRatio")
                 val iKVariance = indexOf("KVariance")
+                val iKMaxMagnitude = indexOf("KMaxMagnitude")
                 val iKConfidence = indexOf("KConfidence")
+                val iKAccelSource = indexOf("KAccelSource")
+                val iTrKStatus = indexOf("TrKStatus")
+                val iTrKRawStatus = indexOf("TrKRawStatus")
+                val iTrKAvg = indexOf("TrKAvg")
+                val iTrKScalarAvg = indexOf("TrKScalarAvg")
+                val iTrKDirectionalityRatio = indexOf("TrKDirectionalityRatio")
+                val iTrKMaxMagnitude = indexOf("TrKMaxMagnitude")
+                val iTrKHorizontalMaxMagnitude = indexOf("TrKHorizontalMaxMagnitude")
+                val iTrKConfidence = indexOf("TrKConfidence")
+                val iTrKAccelSource = indexOf("TrKAccelSource")
                 val iWStatus = indexOf("WStatus")
                 val iStepDeltaWindow = indexOf("StepDeltaWindow")
                 val iGpsIntervalMs = indexOf("GpsIntervalMs")
@@ -821,8 +997,21 @@ object ExportUtil {
                                 kStatus = c.valueAt(iKStatus),
                                 kRawStatus = c.valueAt(iKRawStatus),
                                 kAvg = c.valueAt(iKAvg)?.toFloatOrNull(),
+                                kScalarAvg = c.valueAt(iKScalarAvg)?.toFloatOrNull(),
+                                kDirectionalityRatio = c.valueAt(iKDirectionalityRatio)?.toFloatOrNull(),
                                 kVariance = c.valueAt(iKVariance)?.toFloatOrNull(),
+                                kMaxMagnitude = c.valueAt(iKMaxMagnitude)?.toFloatOrNull(),
                                 kConfidence = c.valueAt(iKConfidence)?.toFloatOrNull(),
+                                kAccelSource = c.valueAt(iKAccelSource),
+                                trKStatus = c.valueAt(iTrKStatus),
+                                trKRawStatus = c.valueAt(iTrKRawStatus),
+                                trKAvg = c.valueAt(iTrKAvg)?.toFloatOrNull(),
+                                trKScalarAvg = c.valueAt(iTrKScalarAvg)?.toFloatOrNull(),
+                                trKDirectionalityRatio = c.valueAt(iTrKDirectionalityRatio)?.toFloatOrNull(),
+                                trKMaxMagnitude = c.valueAt(iTrKMaxMagnitude)?.toFloatOrNull(),
+                                trKHorizontalMaxMagnitude = c.valueAt(iTrKHorizontalMaxMagnitude)?.toFloatOrNull(),
+                                trKConfidence = c.valueAt(iTrKConfidence)?.toFloatOrNull(),
+                                trKAccelSource = c.valueAt(iTrKAccelSource),
                                 wStatus = c.valueAt(iWStatus),
                                 stepDeltaWindow = c.valueAt(iStepDeltaWindow)?.toIntOrNull(),
                                 gpsIntervalMs = c.valueAt(iGpsIntervalMs)?.toLongOrNull(),
@@ -876,6 +1065,16 @@ object ExportUtil {
         enqueueMotionSampleToLocalCsv(context, sample)
     }
 
+    fun rewriteMotionSamplesInLocalCsv(context: Context, samples: List<MotionSample>) {
+        if (samples.isEmpty()) return
+        synchronized(csvQueueLock) {
+            flushMotionQueueLocked(context)
+            samples.groupBy { GpsUtil.getLoggingStart(it.timestamp) }.forEach { (dayStart, daySamples) ->
+                rewriteMotionSamplesInFile(buildDailyMotionLogFile(context, dayStart), daySamples)
+            }
+        }
+    }
+
     fun syncDebugLogToUri(context: Context, fileUri: Uri) {
         try {
             val localFile = buildDebugLogFile(context)
@@ -904,12 +1103,10 @@ object ExportUtil {
     }
 
     fun writeVerboseDebugLog(context: Context, message: String) {
+        ensureVerboseSettingsInit(context)
+        if (!verboseLogEnabled) return  // 設定無効時はコルーチン起動もスキップ
         debugScope.launch {
             try {
-                val settings = SettingsRepository(context)
-                if (!settings.verboseDebugLogEnabled.first()) {
-                    return@launch
-                }
                 writeDebugLog(context, message)
             } catch (_: Exception) {
             }

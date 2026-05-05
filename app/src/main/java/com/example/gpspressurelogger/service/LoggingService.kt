@@ -11,6 +11,7 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.gpspressurelogger.R
@@ -18,11 +19,17 @@ import com.example.gpspressurelogger.data.AppDatabase
 import com.example.gpspressurelogger.data.LogEntry
 import com.example.gpspressurelogger.data.MotionSample
 import com.example.gpspressurelogger.data.SettingsRepository
+import com.example.gpspressurelogger.sensor.ConstantRegionKind
+import com.example.gpspressurelogger.sensor.ConstantRegionResult
+import com.example.gpspressurelogger.sensor.GpsAggregationMode
 import com.example.gpspressurelogger.sensor.MotionGpsPoint
 import com.example.gpspressurelogger.sensor.MotionStateManager
 import com.example.gpspressurelogger.sensor.MotionStateSnapshot
 import com.example.gpspressurelogger.sensor.MovementDetector.Mode
+import com.example.gpspressurelogger.sensor.StKStatus
 import com.example.gpspressurelogger.sensor.StaticMotionStateParamsProvider
+import com.example.gpspressurelogger.sensor.TrKSnapshot
+import com.example.gpspressurelogger.sensor.TrKStatus
 import com.example.gpspressurelogger.util.ExportUtil
 import com.example.gpspressurelogger.util.GpsUtil
 import com.example.gpspressurelogger.util.LoggingConfig
@@ -47,8 +54,12 @@ class LoggingService : Service(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
     private var pressureSensor:      Sensor? = null
     private var linearAccelerationSensor: Sensor? = null
+    private var rotationVectorSensor: Sensor? = null
+    private var orientationAccelerometerSensor: Sensor? = null
+    private var magneticFieldSensor: Sensor? = null
     private var fallbackAccelerometerSensor: Sensor? = null
     private var stepCounterSensor:   Sensor? = null
+    private var stepDetectorSensor:  Sensor? = null
 
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
@@ -57,7 +68,7 @@ class LoggingService : Service(), SensorEventListener {
         val timestampMs: Long,
         val latitude: Double,
         val longitude: Double,
-        val altitude: Double,
+        val altitude: Double?,
         val accuracy: Float
     )
 
@@ -65,38 +76,63 @@ class LoggingService : Service(), SensorEventListener {
         val timestampMs: Long,
         val latitude: Double,
         val longitude: Double,
-        val altitude: Double,
+        val altitude: Double?,
         val accuracy: Float?
     )
 
     private var lastPressure: Float? = null
-    private var lastStepCount: Int? = null
-    private var lastSlotStepCount: Int? = null
     private val gpsPool = ArrayDeque<GpsSample>()
     private var lastAcceptedGpsPoint: AggregatedGpsPoint? = null
+    private var lastGpsAltitude: Double? = null
     private var lastBootstrapGpsRequestMs: Long = 0L
 
     private var nextPressureWidgetUpdateMs: Long = Long.MAX_VALUE
-    private var nextMapWidgetUpdateMs:      Long = Long.MAX_VALUE
+    private var nextMapWidgetUpdateMs: Long = Long.MAX_VALUE
     private var currentPressureWidgetIntervalMs: Long = -1L
     private var currentMapWidgetIntervalMs: Long = -1L
+    // DataStore 毎回読み込みを避けるためにキャッシュ（Flow collector で更新）
+    @Volatile private var cachedPressureWidgetIntervalMin: Int = SettingsRepository.DEFAULT_PRESSURE_WIDGET_INTERVAL_MIN
+    @Volatile private var cachedMapWidgetIntervalMin: Int = SettingsRepository.DEFAULT_MAP_WIDGET_INTERVAL_MIN
 
     private val motionDispatcher = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "MotionStateManager")
     }.asCoroutineDispatcher()
     private val motionScope = CoroutineScope(SupervisorJob() + motionDispatcher)
     private val motionStateParamsProvider = StaticMotionStateParamsProvider()
-    private val motionStateManager = MotionStateManager(motionStateParamsProvider)
+    private val motionStateManager = MotionStateManager(
+        paramsProvider = motionStateParamsProvider,
+        onStepCountUp = { delta, total, timestampMs ->
+            ExportUtil.writeVerboseDebugLog(this, "STEP_COUNT_UP: delta=$delta total=$total ts=$timestampMs")
+        },
+        onStepReset = {
+            ExportUtil.writeDebugLog(this, "STEP_RESET: 歩数をリセットしました")
+        },
+        onTrKChanged = { snapshot ->
+            ExportUtil.writeVerboseDebugLog(this, "TRK_CHANGED: ${snapshot.status}")
+            if (snapshot.status == TrKStatus.ON) {
+                serviceScope.launch {
+                    handleTrKTransitionGps(snapshot)
+                }
+            }
+        }
+    )
     private var currentGpsMode   = Mode.UNKNOWN
     private var currentGpsRequestIntervalMs: Long = -1L
     private var lastGpsIntervalChangeMs: Long = 0L
-    private var lastImmediateGpsRequestMs: Long = 0L
-    private var previousSlotMode = Mode.UNKNOWN
+    private var lastBurstGpsRequestMs: Long = 0L
+    private var burstGpsCallback: LocationCallback? = null
+    private var burstGpsTimeoutJob: Job? = null
+    private var burstBestLocation: android.location.Location? = null
+    private var burstCandidateCount: Int = 0
+    private var previousGpsAggregationMode = GpsAggregationMode.UNKNOWN
 
     private lateinit var db: AppDatabase
     private lateinit var settings: SettingsRepository
     private var samplingJob: Job? = null
     private var hasLoggedFirstRecordAfterStart = false
+    private val pendingMotionCsvRewriteLock = Any()
+    private val pendingMotionCsvRewrites = linkedMapOf<Long, MotionSample>()
+    private var pendingMotionCsvRewriteJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -104,13 +140,24 @@ class LoggingService : Service(), SensorEventListener {
         settings = SettingsRepository(this)
 
         ExportUtil.writeDebugLog(this, "SERVICE_CREATE: サービスを開始しました")
+        ExportUtil.writeDebugLog(
+            this,
+            "MOTION_LOG_ROUTINE: ${LoggingConfig.MOTION_LOG_ROUTINE.name}"
+        )
 
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         pressureSensor      = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
         linearAccelerationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+        rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        orientationAccelerometerSensor =
+            if (rotationVectorSensor == null) sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) else null
+        magneticFieldSensor =
+            if (rotationVectorSensor == null) sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD) else null
         fallbackAccelerometerSensor =
             if (linearAccelerationSensor == null) sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) else null
         stepCounterSensor   = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+        stepDetectorSensor  = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+        motionStateManager.setStepDetectorAvailable(stepDetectorSensor != null)
 
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         locationCallback = object : LocationCallback() {
@@ -118,6 +165,20 @@ class LoggingService : Service(), SensorEventListener {
                 result.locations.forEach { loc ->
                     enqueueGpsLocation(loc)
                 }
+            }
+        }
+
+        // ウィジェット更新間隔設定をキャッシュし、変更時に再スケジュール
+        serviceScope.launch {
+            settings.pressureWidgetIntervalMin.collect { min ->
+                cachedPressureWidgetIntervalMin = min
+                currentPressureWidgetIntervalMs = -1L // 次スロットで再スケジュール
+            }
+        }
+        serviceScope.launch {
+            settings.mapWidgetIntervalMin.collect { min ->
+                cachedMapWidgetIntervalMin = min
+                currentMapWidgetIntervalMs = -1L // 次スロットで再スケジュール
             }
         }
 
@@ -129,8 +190,14 @@ class LoggingService : Service(), SensorEventListener {
     private fun registerAllSensors() {
         pressureSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
         linearAccelerationSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
-        fallbackAccelerometerSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        rotationVectorSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        orientationAccelerometerSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        magneticFieldSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        fallbackAccelerometerSensor
+            ?.takeIf { it != orientationAccelerometerSensor }
+            ?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
         stepCounterSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
+        stepDetectorSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -141,7 +208,7 @@ class LoggingService : Service(), SensorEventListener {
         hasLoggedFirstRecordAfterStart = false
         updateGpsRequest(
             mode = Mode.UNKNOWN,
-            targetIntervalMs = motionStateParamsProvider.current().gpsStretchMaxMs,
+            targetIntervalMs = motionStateParamsProvider.current().gpsStableInitialMs,
             immediate = false,
             referenceTimestampMs = System.currentTimeMillis(),
             force = true
@@ -152,10 +219,19 @@ class LoggingService : Service(), SensorEventListener {
 
     override fun onDestroy() {
         ExportUtil.writeDebugLog(this, "SERVICE_DESTROY: サービスを終了しました")
+        runBlocking {
+            val pendingJob = synchronized(pendingMotionCsvRewriteLock) {
+                pendingMotionCsvRewriteJob?.also { pendingMotionCsvRewriteJob = null }
+            }
+            pendingJob?.cancelAndJoin()
+            flushPendingMotionCsvRewrites("service_destroy")
+        }
         ExportUtil.flushPendingCsvQueues(this)
         super.onDestroy()
         sensorManager.unregisterListener(this)
         fusedLocationClient.removeLocationUpdates(locationCallback)
+        burstGpsCallback?.let { fusedLocationClient.removeLocationUpdates(it) }
+        burstGpsTimeoutJob?.cancel()
         motionScope.cancel()
         motionDispatcher.close()
         serviceScope.cancel()
@@ -169,8 +245,15 @@ class LoggingService : Service(), SensorEventListener {
         try {
             fusedLocationClient.removeLocationUpdates(locationCallback)
             fusedLocationClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
-            requestBootstrapLocationIfNeeded(mode)
+            requestBootstrapLocationIfNeeded(gpsAggregationModeForBootstrap(mode))
         } catch (e: SecurityException) { Log.e(TAG, "Location error", e) }
+    }
+
+    private fun gpsAggregationModeForBootstrap(mode: Mode): GpsAggregationMode = when (mode) {
+        Mode.DEVICE_STILL -> GpsAggregationMode.DEVICE_STILL
+        Mode.STOPPED -> GpsAggregationMode.STOPPED
+        Mode.WALKING, Mode.VEHICLE -> GpsAggregationMode.MOVING
+        Mode.UNKNOWN -> GpsAggregationMode.UNKNOWN
     }
 
     override fun onSensorChanged(event: SensorEvent) {
@@ -185,19 +268,48 @@ class LoggingService : Service(), SensorEventListener {
                     motionStateManager.addLinearAccelerationSample(ax, ay, az, timestampMs)
                 }
             }
+            Sensor.TYPE_ROTATION_VECTOR -> {
+                val values = event.values.copyOf()
+                motionScope.launch {
+                    motionStateManager.updateRotationVector(values)
+                }
+            }
+            Sensor.TYPE_MAGNETIC_FIELD -> {
+                val mx = event.values[0]
+                val my = event.values[1]
+                val mz = event.values[2]
+                motionScope.launch {
+                    motionStateManager.updateMagneticField(mx, my, mz)
+                }
+            }
             Sensor.TYPE_ACCELEROMETER -> {
-                if (linearAccelerationSensor == null) {
-                    val ax = event.values[0]
-                    val ay = event.values[1]
-                    val az = event.values[2]
-                    val timestampMs = System.currentTimeMillis()
-                    val motionNorm = abs(sqrt(ax * ax + ay * ay + az * az) - GRAVITY_MPS2)
-                    motionScope.launch {
+                val ax = event.values[0]
+                val ay = event.values[1]
+                val az = event.values[2]
+                val timestampMs = System.currentTimeMillis()
+                motionScope.launch {
+                    if (rotationVectorSensor == null) {
+                        motionStateManager.updateOrientationAcceleration(ax, ay, az)
+                    }
+                    if (linearAccelerationSensor == null) {
+                        val motionNorm = abs(sqrt(ax * ax + ay * ay + az * az) - GRAVITY_MPS2)
                         motionStateManager.addAccelerationNormSample(motionNorm, timestampMs)
                     }
                 }
             }
-            Sensor.TYPE_STEP_COUNTER -> lastStepCount = event.values[0].toInt()
+            Sensor.TYPE_STEP_COUNTER -> {
+                val currentTotal = event.values[0].toInt()
+                val timestampMs = System.currentTimeMillis()
+                motionScope.launch {
+                    motionStateManager.addStepCounterTotal(currentTotal, timestampMs)
+                }
+            }
+            Sensor.TYPE_STEP_DETECTOR -> {
+                val timestampMs = System.currentTimeMillis()
+                motionScope.launch {
+                    motionStateManager.addStepDetectorEvent(timestampMs)
+                }
+            }
         }
     }
 
@@ -216,10 +328,9 @@ class LoggingService : Service(), SensorEventListener {
     private suspend fun processSamplingSlot() {
         val slotTimestamp = System.currentTimeMillis()
         val gpsSamplesInSlot = synchronized(gpsPool) { gpsPool.count { it.timestampMs <= slotTimestamp } }
-        val stepDeltaRaw = consumeStepDeltaForSlot()
-        val motionSnapshot = withContext(motionDispatcher) {
-            motionStateManager.addStepDelta(stepDeltaRaw, slotTimestamp)
-            motionStateManager.updateBaseCycle(slotTimestamp)
+        val (stepDeltaRaw, motionSnapshot) = withContext(motionDispatcher) {
+            val stepDelta = motionStateManager.consumeStepDeltaForSlot()
+            stepDelta to motionStateManager.updateBaseCycle(slotTimestamp)
         }
         persistMotionSample(slotTimestamp, motionSnapshot, stepDeltaRaw)
 
@@ -238,23 +349,30 @@ class LoggingService : Service(), SensorEventListener {
                 buildModeLogMessage(previousMode, motionSnapshot)
             )
         } else if (gpsRequestChanged) {
-            val avgText = motionSnapshot.kStatus.avg?.let { String.format("%.3f", it) } ?: "null"
-            val varText = motionSnapshot.kStatus.variance?.let { String.format("%.4f", it) } ?: "null"
+            val avgText = motionSnapshot.stK.avg?.let { String.format("%.3f", it) } ?: "null"
+            val ratioText = motionSnapshot.stK.directionalityRatio?.let { String.format("%.3f", it) } ?: "null"
+            val scalarText = motionSnapshot.stK.scalarAvg?.let { String.format("%.3f", it) } ?: "null"
+            val varText = motionSnapshot.stK.variance?.let { String.format("%.4f", it) } ?: "null"
             ExportUtil.writeDebugLog(
                 this,
                 "GPS_INTERVAL_CHANGED: mode=${motionSnapshot.finalMode} intervalSec=${currentGpsRequestIntervalMs / 1000.0} " +
-                    "k=${motionSnapshot.kStatus.status} w=${motionSnapshot.wStatus.status} avg=$avgText var=$varText"
+                    "stK=${motionSnapshot.stK.status} w=${motionSnapshot.wStatus.status} " +
+                    "avg=$avgText ratio=$ratioText scalar=$scalarText var=$varText accelSource=${motionSnapshot.stK.source}"
             )
         }
 
         val entry = buildLogEntry(
             slotTimestamp = slotTimestamp,
-            mode = motionSnapshot.finalMode,
+            gpsAggregationMode = motionSnapshot.gpsAggregationMode,
             stepDelta = stepDeltaRaw ?: 0
         )
+        withContext(motionDispatcher) {
+            motionStateManager.recordGpsSamplingResult(isGpsAcceptedForStretch(entry))
+        }
         ExportUtil.writeVerboseDebugLog(
             this,
             "SLOT_SUMMARY: timestamp=$slotTimestamp mode=${motionSnapshot.finalMode} " +
+                "gpsAggregation=${motionSnapshot.gpsAggregationMode} " +
                 "gpsPoolCount=$gpsSamplesInSlot hasGps=${entry.hasLocation} " +
                 "pressure=${entry.pressureRaw} stepsDelta=${entry.stepsDelta}"
         )
@@ -271,7 +389,7 @@ class LoggingService : Service(), SensorEventListener {
             hasLoggedFirstRecordAfterStart = true
         }
 
-        previousSlotMode = motionSnapshot.finalMode
+        previousGpsAggregationMode = motionSnapshot.gpsAggregationMode
 
         updateWidgetsIfDue(slotTimestamp)
     }
@@ -301,15 +419,22 @@ class LoggingService : Service(), SensorEventListener {
             .build()
     }
 
+    private fun isGpsAcceptedForStretch(entry: LogEntry): Boolean =
+        entry.hasLocation &&
+            entry.gpsAccuracy != null &&
+            entry.gpsAccuracy <= LoggingConfig.GPS_STRETCH_ACCEPT_ACCURACY_M
+
+    @Synchronized
     private fun updateGpsRequest(
         mode: Mode,
         targetIntervalMs: Long,
         immediate: Boolean,
         referenceTimestampMs: Long,
-        force: Boolean
+        force: Boolean,
+        forceImmediate: Boolean = false
     ): Boolean {
         if (immediate) {
-            requestImmediateLocationIfDue(referenceTimestampMs, targetIntervalMs)
+            requestBurstLocationIfDue(referenceTimestampMs, targetIntervalMs, force = forceImmediate)
         }
         val shouldShorten = currentGpsRequestIntervalMs <= 0L || targetIntervalMs < currentGpsRequestIntervalMs
         val shouldLengthen =
@@ -330,20 +455,183 @@ class LoggingService : Service(), SensorEventListener {
         return true
     }
 
-    private fun requestImmediateLocationIfDue(nowMs: Long, cooldownMs: Long) {
+    private fun handleTrKTransitionGps(snapshot: TrKSnapshot) {
+        val params = motionStateParamsProvider.current()
+        updateGpsRequest(
+            mode = Mode.VEHICLE,
+            targetIntervalMs = params.gpsKMinMs,
+            immediate = true,
+            referenceTimestampMs = snapshot.timestampMs,
+            force = true,
+            forceImmediate = true
+        )
+        val avgText = snapshot.avg?.let { String.format("%.3f", it) } ?: "null"
+        val ratioText = snapshot.directionalityRatio?.let { String.format("%.3f", it) } ?: "null"
+        ExportUtil.writeDebugLog(
+            this,
+            "TRK_GPS_IMMEDIATE: ts=${snapshot.timestampMs} intervalSec=${params.gpsKMinMs / 1000.0} " +
+                "trK=${snapshot.status} avg=$avgText ratio=$ratioText accelSource=${snapshot.source}"
+        )
+    }
+
+    private fun requestBurstLocationIfDue(nowMs: Long, cooldownMs: Long, force: Boolean = false) {
         val effectiveCooldownMs = cooldownMs.coerceAtLeast(LoggingConfig.GPS_MIN_INTERVAL_MS)
-        if (nowMs - lastImmediateGpsRequestMs < effectiveCooldownMs) return
-        lastImmediateGpsRequestMs = nowMs
+        if (!force && nowMs - lastBurstGpsRequestMs < effectiveCooldownMs) {
+            ExportUtil.writeDebugLog(
+                this,
+                "GPS_BURST_SKIPPED_COOLDOWN: ts=$nowMs elapsedSinceLastMs=${nowMs - lastBurstGpsRequestMs} " +
+                    "cooldownMs=$effectiveCooldownMs"
+            )
+            return
+        }
+        lastBurstGpsRequestMs = nowMs
+        stopBurstGps("replaced")
+        val requestStartedMs = System.currentTimeMillis()
+        burstBestLocation = null
+        burstCandidateCount = 0
         try {
-            val request = CurrentLocationRequest.Builder()
-                .setMaxUpdateAgeMillis(0L)
+            val request = LocationRequest.Builder(
+                Priority.PRIORITY_HIGH_ACCURACY,
+                LoggingConfig.GPS_BURST_INTERVAL_MS
+            )
+                .setMinUpdateIntervalMillis(LoggingConfig.GPS_BURST_MIN_INTERVAL_MS)
+                .setMaxUpdateAgeMillis(LoggingConfig.GPS_BURST_MAX_UPDATE_AGE_MS)
+                .setWaitForAccurateLocation(true)
+                .setDurationMillis(LoggingConfig.GPS_BURST_DURATION_MS)
+                .setMaxUpdates(LoggingConfig.GPS_BURST_MAX_UPDATES)
                 .build()
-            fusedLocationClient.getCurrentLocation(request, null)
-                .addOnSuccessListener { location ->
-                    location?.let { enqueueGpsLocation(it) }
+            ExportUtil.writeDebugLog(
+                this,
+                "GPS_BURST_START: ts=$nowMs priority=HIGH_ACCURACY " +
+                    "intervalMs=${LoggingConfig.GPS_BURST_INTERVAL_MS} " +
+                    "minIntervalMs=${LoggingConfig.GPS_BURST_MIN_INTERVAL_MS} " +
+                    "maxUpdateAgeMs=${LoggingConfig.GPS_BURST_MAX_UPDATE_AGE_MS} " +
+                    "durationMs=${LoggingConfig.GPS_BURST_DURATION_MS} " +
+                    "maxUpdates=${LoggingConfig.GPS_BURST_MAX_UPDATES} force=$force"
+            )
+
+            val callback = object : LocationCallback() {
+                override fun onLocationResult(result: LocationResult) {
+                    result.locations.forEach { location ->
+                        handleBurstGpsCandidate(location, requestStartedMs)
+                    }
                 }
+
+                override fun onLocationAvailability(availability: LocationAvailability) {
+                    if (!availability.isLocationAvailable) {
+                        ExportUtil.writeDebugLog(
+                            this@LoggingService,
+                            "GPS_BURST_UNAVAILABLE: elapsedMs=${System.currentTimeMillis() - requestStartedMs}"
+                        )
+                    }
+                }
+            }
+            burstGpsCallback = callback
+            fusedLocationClient.requestLocationUpdates(request, callback, Looper.getMainLooper())
+            burstGpsTimeoutJob = serviceScope.launch {
+                delay(LoggingConfig.GPS_BURST_DURATION_MS + 500L)
+                finalizeBurstGps("timeout")
+            }
         } catch (e: SecurityException) {
-            Log.e(TAG, "Immediate location error", e)
+            ExportUtil.writeDebugLog(
+                this,
+                "GPS_BURST_SECURITY_ERROR: ts=$nowMs error=${e.message ?: ""}"
+            )
+            Log.e(TAG, "Burst location error", e)
+        }
+    }
+
+    @Synchronized
+    private fun handleBurstGpsCandidate(location: android.location.Location, requestStartedMs: Long) {
+        if (burstGpsCallback == null) return
+        burstCandidateCount += 1
+        val elapsedMs = System.currentTimeMillis() - requestStartedMs
+        val ageMs = locationAgeMs(location)
+        val accuracy = if (location.hasAccuracy()) location.accuracy else Float.POSITIVE_INFINITY
+        val currentBest = burstBestLocation
+        if (currentBest == null || accuracy < currentBest.accuracy) {
+            burstBestLocation = location
+        }
+        ExportUtil.writeDebugLog(
+            this,
+            "GPS_BURST_CANDIDATE: elapsedMs=$elapsedMs ageMs=$ageMs " +
+                "accuracy=$accuracy provider=${location.provider} count=$burstCandidateCount " +
+                "lat=${location.latitude} lon=${location.longitude}"
+        )
+
+        when {
+            accuracy <= LoggingConfig.GPS_BURST_GOOD_ACCURACY_M -> {
+                acceptBurstGps(location, "good", elapsedMs, ageMs, accuracy)
+            }
+            burstCandidateCount >= LoggingConfig.GPS_BURST_MAX_UPDATES -> {
+                finalizeBurstGps("max_updates")
+            }
+        }
+    }
+
+    @Synchronized
+    private fun finalizeBurstGps(reason: String) {
+        val callback = burstGpsCallback ?: return
+        val best = burstBestLocation
+        val bestAccuracy = best?.takeIf { it.hasAccuracy() }?.accuracy
+        if (best != null && bestAccuracy != null && bestAccuracy <= LoggingConfig.GPS_BURST_USABLE_ACCURACY_M) {
+            acceptBurstGps(best, "usable_$reason", null, locationAgeMs(best), bestAccuracy)
+            return
+        }
+        fusedLocationClient.removeLocationUpdates(callback)
+        burstGpsCallback = null
+        burstGpsTimeoutJob?.cancel()
+        burstGpsTimeoutJob = null
+        burstBestLocation = null
+        burstCandidateCount = 0
+        ExportUtil.writeDebugLog(
+            this,
+            "GPS_BURST_REJECT: reason=$reason bestAccuracy=${bestAccuracy ?: "null"}"
+        )
+    }
+
+    @Synchronized
+    private fun acceptBurstGps(
+        location: android.location.Location,
+        reason: String,
+        elapsedMs: Long?,
+        ageMs: Long,
+        accuracy: Float
+    ) {
+        val callback = burstGpsCallback ?: return
+        fusedLocationClient.removeLocationUpdates(callback)
+        burstGpsCallback = null
+        burstGpsTimeoutJob?.cancel()
+        burstGpsTimeoutJob = null
+        burstBestLocation = null
+        burstCandidateCount = 0
+        ExportUtil.writeDebugLog(
+            this,
+            "GPS_BURST_ACCEPT: reason=$reason elapsedMs=${elapsedMs ?: "n/a"} " +
+                "ageMs=$ageMs accuracy=$accuracy provider=${location.provider} " +
+                "lat=${location.latitude} lon=${location.longitude}"
+        )
+        enqueueGpsLocation(location)
+    }
+
+    @Synchronized
+    private fun stopBurstGps(reason: String) {
+        val callback = burstGpsCallback ?: return
+        fusedLocationClient.removeLocationUpdates(callback)
+        burstGpsCallback = null
+        burstGpsTimeoutJob?.cancel()
+        burstGpsTimeoutJob = null
+        burstBestLocation = null
+        burstCandidateCount = 0
+        ExportUtil.writeDebugLog(this, "GPS_BURST_STOP: reason=$reason")
+    }
+
+    private fun locationAgeMs(location: android.location.Location): Long {
+        val elapsedRealtimeNanos = location.elapsedRealtimeNanos
+        return if (elapsedRealtimeNanos > 0L) {
+            ((SystemClock.elapsedRealtimeNanos() - elapsedRealtimeNanos) / 1_000_000L).coerceAtLeast(0L)
+        } else {
+            (System.currentTimeMillis() - location.time).coerceAtLeast(0L)
         }
     }
 
@@ -359,44 +647,31 @@ class LoggingService : Service(), SensorEventListener {
         const val NOTIFICATION_ID = 1001
     }
 
-    private fun consumeStepDeltaForSlot(): Int? {
-        val current = lastStepCount ?: return null
-        val previous = lastSlotStepCount
-        lastSlotStepCount = current
-        if (previous == null) return null
-        return if (current >= previous) {
-            current - previous
-        } else {
-            current.coerceAtLeast(0)
-        }
-    }
-
     private suspend fun updateWidgetsIfDue(slotTimestamp: Long) {
-        val pressureIntervalMs = (settings.pressureWidgetIntervalMin.first().coerceAtLeast(1)) * 1000L
+        // DataStore 読み込みなし: キャッシュ済み値を使用（Flow collector が設定変更時に更新）
+        val pressureIntervalMs = cachedPressureWidgetIntervalMin.coerceAtLeast(1) * 1000L
         if (pressureIntervalMs != currentPressureWidgetIntervalMs) {
             currentPressureWidgetIntervalMs = pressureIntervalMs
-            nextPressureWidgetUpdateMs = slotTimestamp + pressureIntervalMs
+            nextPressureWidgetUpdateMs = slotTimestamp
+            Log.d(TAG, "WIDGET_SCHEDULE_INIT: type=pressure intervalMs=$pressureIntervalMs next=$nextPressureWidgetUpdateMs")
         }
         if (slotTimestamp >= nextPressureWidgetUpdateMs) {
             PressureWidgetReceiver.updateAll(this)
-            nextPressureWidgetUpdateMs = alignNextWidgetUpdate(slotTimestamp, pressureIntervalMs)
+            nextPressureWidgetUpdateMs = slotTimestamp + pressureIntervalMs
+            Log.d(TAG, "WIDGET_UPDATE_DUE: type=pressure slot=$slotTimestamp intervalMs=$pressureIntervalMs next=$nextPressureWidgetUpdateMs")
         }
 
-        val mapIntervalMs = (settings.mapWidgetIntervalMin.first().coerceAtLeast(1)) * 1000L
+        val mapIntervalMs = cachedMapWidgetIntervalMin.coerceAtLeast(1) * 1000L
         if (mapIntervalMs != currentMapWidgetIntervalMs) {
             currentMapWidgetIntervalMs = mapIntervalMs
-            nextMapWidgetUpdateMs = slotTimestamp + mapIntervalMs
+            nextMapWidgetUpdateMs = slotTimestamp
+            Log.d(TAG, "WIDGET_SCHEDULE_INIT: type=map intervalMs=$mapIntervalMs next=$nextMapWidgetUpdateMs")
         }
         if (slotTimestamp >= nextMapWidgetUpdateMs) {
             MapWidgetReceiver.updateAll(this)
-            nextMapWidgetUpdateMs = alignNextWidgetUpdate(slotTimestamp, mapIntervalMs)
+            nextMapWidgetUpdateMs = slotTimestamp + mapIntervalMs
+            Log.d(TAG, "WIDGET_UPDATE_DUE: type=map slot=$slotTimestamp intervalMs=$mapIntervalMs next=$nextMapWidgetUpdateMs")
         }
-    }
-
-    private fun alignNextWidgetUpdate(nowMs: Long, intervalMs: Long): Long {
-        if (intervalMs <= 0L) return nowMs
-        val intervalsElapsed = nowMs / intervalMs
-        return (intervalsElapsed + 1L) * intervalMs
     }
 
     private suspend fun persistMotionSample(
@@ -404,23 +679,89 @@ class LoggingService : Service(), SensorEventListener {
         snapshot: MotionStateSnapshot,
         stepDelta3s: Int?
     ) {
+        val sample = buildMotionSample(slotTimestamp, snapshot, stepDelta3s)
+        db.motionSampleDao().insertReplace(sample)
+        ExportUtil.enqueueMotionSampleToLocalCsv(this, sample)
+        finalizeCompletedConstantRegion(snapshot.completedRegion)
+    }
+
+    private fun buildMotionSample(
+        slotTimestamp: Long,
+        snapshot: MotionStateSnapshot,
+        stepDelta3s: Int?
+    ): MotionSample =
+        when (LoggingConfig.MOTION_LOG_ROUTINE) {
+            LoggingConfig.MotionLogRoutine.NORMAL ->
+                buildNormalMotionSample(slotTimestamp, snapshot, stepDelta3s)
+            LoggingConfig.MotionLogRoutine.FULL ->
+                buildFullMotionSample(slotTimestamp, snapshot, stepDelta3s)
+        }
+
+    private fun buildNormalMotionSample(
+        slotTimestamp: Long,
+        snapshot: MotionStateSnapshot,
+        stepDelta3s: Int?
+    ): MotionSample {
+        val normalizedStepDelta = stepDelta3s?.coerceAtLeast(0)
+        val region = snapshot.completedRegion ?: snapshot.activeRegionEstimate
+        return MotionSample(
+            timestamp = slotTimestamp,
+            stepDelta3s = normalizedStepDelta,
+            kStatus = snapshot.stK.status.name,
+            trKStatus = snapshot.trK.status.name,
+            wStatus = snapshot.wStatus.status.name,
+            stepDeltaWindow = snapshot.wStatus.stepDeltaWindow,
+            confirmedMode = if (snapshot.finalModeConfirmed) snapshot.finalMode.name else null,
+            constantRegionKind = region?.kind?.name,
+            constantRegionSpeedKmh = region?.averageSpeedKmh,
+            constantRegionStartLat = region?.startPoint?.latitude,
+            constantRegionStartLon = region?.startPoint?.longitude,
+            constantRegionEndLat = region?.endPoint?.latitude,
+            constantRegionEndLon = region?.endPoint?.longitude,
+            constantRegionStayLat = region?.stayPoint?.latitude,
+            constantRegionStayLon = region?.stayPoint?.longitude
+        )
+    }
+
+    private fun buildFullMotionSample(
+        slotTimestamp: Long,
+        snapshot: MotionStateSnapshot,
+        stepDelta3s: Int?
+    ): MotionSample {
         val normalizedStepDelta = stepDelta3s?.coerceAtLeast(0)
         val stepRate3s = normalizedStepDelta?.div(LoggingConfig.SLOT_INTERVAL_SECONDS)
+
+        // 確定した結果があればそれを、なければ現在の暫定推計（active）を保存する。
+        // confirmedMode には確定済みの状態だけを入れ、現在進行中の暫定停止は混ぜない。
         val region = snapshot.completedRegion ?: snapshot.activeRegionEstimate
-        val sample = MotionSample(
+
+        return MotionSample(
             timestamp = slotTimestamp,
             stepDelta3s = normalizedStepDelta,
             stepRate3s = stepRate3s,
-            kStatus = snapshot.kStatus.status.name,
-            kRawStatus = snapshot.kStatus.rawStatus.name,
-            kAvg = snapshot.kStatus.avg,
-            kVariance = snapshot.kStatus.variance,
-            kConfidence = snapshot.kStatus.confidence,
+            kStatus = snapshot.stK.status.name,
+            kRawStatus = snapshot.stK.rawStatus.name,
+            kAvg = snapshot.stK.avg,
+            kScalarAvg = snapshot.stK.scalarAvg,
+            kDirectionalityRatio = snapshot.stK.directionalityRatio,
+            kVariance = snapshot.stK.variance,
+            kMaxMagnitude = snapshot.stK.maxMagnitude,
+            kConfidence = snapshot.stK.confidence,
+            kAccelSource = snapshot.stK.source.name,
+            trKStatus = snapshot.trK.status.name,
+            trKRawStatus = snapshot.trK.rawStatus.name,
+            trKAvg = snapshot.trK.avg,
+            trKScalarAvg = snapshot.trK.scalarAvg,
+            trKDirectionalityRatio = snapshot.trK.directionalityRatio,
+            trKMaxMagnitude = snapshot.trK.maxMagnitude,
+            trKHorizontalMaxMagnitude = snapshot.trK.horizontalMaxMagnitude,
+            trKConfidence = snapshot.trK.confidence,
+            trKAccelSource = snapshot.trK.source.name,
             wStatus = snapshot.wStatus.status.name,
             stepDeltaWindow = snapshot.wStatus.stepDeltaWindow,
             gpsIntervalMs = snapshot.gpsSampling.intervalMs,
             gpsImmediate = snapshot.gpsSampling.immediate,
-            confirmedMode = snapshot.finalMode.name,
+            confirmedMode = if (snapshot.finalModeConfirmed) snapshot.finalMode.name else null,
             constantRegionKind = region?.kind?.name,
             constantRegionSpeedKmh = region?.averageSpeedKmh,
             constantRegionStartLat = region?.startPoint?.latitude,
@@ -431,9 +772,98 @@ class LoggingService : Service(), SensorEventListener {
             constantRegionStayLon = region?.stayPoint?.longitude,
             constantRegionDirectionDeg = region?.directionDeg
         )
-        db.motionSampleDao().insertReplace(sample)
-        ExportUtil.enqueueMotionSampleToLocalCsv(this, sample)
     }
+
+    private suspend fun finalizeCompletedConstantRegion(region: ConstantRegionResult?) {
+        if (region == null || region.kind == ConstantRegionKind.NONE) return
+        if (region.endTimestampMs <= region.startTimestampMs) return
+
+        val samples = db.motionSampleDao().getBetweenOnce(
+            fromTs = region.startTimestampMs,
+            toExclusiveTs = region.endTimestampMs
+        )
+        if (samples.isEmpty()) return
+
+        val finalized = samples.map { sample ->
+            sample.copy(
+                confirmedMode = finalizedModeFor(sample, region).name,
+                constantRegionKind = region.kind.name,
+                constantRegionSpeedKmh = region.averageSpeedKmh,
+                constantRegionStartLat = region.startPoint?.latitude,
+                constantRegionStartLon = region.startPoint?.longitude,
+                constantRegionEndLat = region.endPoint?.latitude,
+                constantRegionEndLon = region.endPoint?.longitude,
+                constantRegionStayLat = region.stayPoint?.latitude,
+                constantRegionStayLon = region.stayPoint?.longitude,
+                constantRegionDirectionDeg = region.directionDeg
+            )
+        }
+
+        db.motionSampleDao().insertAllReplace(finalized)
+        enqueueMotionCsvRewrite(finalized)
+        ExportUtil.writeVerboseDebugLog(
+            this,
+            "CONSTANT_REGION_FINALIZED: kind=${region.kind} start=${region.startTimestampMs} " +
+                "end=${region.endTimestampMs} samples=${finalized.size} speed=${String.format("%.2f", region.averageSpeedKmh)}"
+        )
+    }
+
+    private fun enqueueMotionCsvRewrite(samples: List<MotionSample>) {
+        if (samples.isEmpty()) return
+        val flushImmediately = synchronized(pendingMotionCsvRewriteLock) {
+            samples.forEach { sample ->
+                pendingMotionCsvRewrites[sample.timestamp] = sample
+            }
+            val shouldFlushNow =
+                pendingMotionCsvRewrites.size >= LoggingConfig.CSV_MOTION_REWRITE_MAX_PENDING_SAMPLES
+            pendingMotionCsvRewriteJob?.cancel()
+            pendingMotionCsvRewriteJob = if (shouldFlushNow) {
+                serviceScope.launch {
+                    flushPendingMotionCsvRewrites("queue_limit")
+                }
+            } else {
+                serviceScope.launch {
+                    delay(LoggingConfig.CSV_MOTION_REWRITE_DEBOUNCE_MS)
+                    flushPendingMotionCsvRewrites("debounce")
+                }
+            }
+            shouldFlushNow
+        }
+        if (flushImmediately) {
+            ExportUtil.writeVerboseDebugLog(
+                this,
+                "MOTION_CSV_REWRITE_SCHEDULED: reason=queue_limit pending=${samples.size}"
+            )
+        }
+    }
+
+    private suspend fun flushPendingMotionCsvRewrites(reason: String) {
+        val samples = synchronized(pendingMotionCsvRewriteLock) {
+            pendingMotionCsvRewriteJob = null
+            if (pendingMotionCsvRewrites.isEmpty()) return
+            val batch = pendingMotionCsvRewrites.values.sortedBy { it.timestamp }
+            pendingMotionCsvRewrites.clear()
+            batch
+        }
+        ExportUtil.rewriteMotionSamplesInLocalCsv(this, samples)
+        ExportUtil.writeVerboseDebugLog(
+            this,
+            "MOTION_CSV_REWRITE_FLUSH: reason=$reason samples=${samples.size}"
+        )
+    }
+
+    private fun finalizedModeFor(sample: MotionSample, region: ConstantRegionResult): Mode =
+        when (region.kind) {
+            ConstantRegionKind.CONSTANT_MOVE -> Mode.VEHICLE
+            ConstantRegionKind.STAY -> if (StKStatus.fromStored(sample.kStatus) == StKStatus.STK1) {
+                Mode.DEVICE_STILL
+            } else {
+                Mode.STOPPED
+            }
+            ConstantRegionKind.NONE -> sample.confirmedMode
+                ?.let { runCatching { Mode.valueOf(it) }.getOrNull() }
+                ?: Mode.UNKNOWN
+        }
 
     private fun enqueueGpsLocation(location: android.location.Location) {
         val accuracy = location.accuracy
@@ -441,7 +871,7 @@ class LoggingService : Service(), SensorEventListener {
         val latitude = location.latitude
         val longitude = location.longitude
         if (latitude == 0.0 && longitude == 0.0) return
-        val altitude = location.altitude
+        val altitude = getLatestAltitude(location)
         val timestampMs = location.time.takeIf { it > 0L } ?: System.currentTimeMillis()
         synchronized(gpsPool) {
             gpsPool.addLast(
@@ -469,13 +899,14 @@ class LoggingService : Service(), SensorEventListener {
 
     private fun buildLogEntry(
         slotTimestamp: Long,
-        mode: Mode,
+        gpsAggregationMode: GpsAggregationMode,
         stepDelta: Int
     ): LogEntry {
         val pressure = lastPressure
-        val aggregatedGps = aggregateGpsForSlot(slotTimestamp, mode)
-        val qnh = if (pressure != null && aggregatedGps != null) {
-            PressureUtil.calcQnh(pressure, aggregatedGps.altitude)
+        val aggregatedGps = aggregateGpsForSlot(slotTimestamp, gpsAggregationMode)
+        val altitude = aggregatedGps?.altitude
+        val qnh = if (pressure != null && altitude != null) {
+            PressureUtil.calcQnh(pressure, altitude)
         } else {
             null
         }
@@ -483,7 +914,7 @@ class LoggingService : Service(), SensorEventListener {
             timestamp = slotTimestamp,
             latitude = aggregatedGps?.latitude,
             longitude = aggregatedGps?.longitude,
-            altitudeGps = aggregatedGps?.altitude,
+            altitudeGps = altitude,
             pressureRaw = pressure,
             pressureQnh = qnh,
             gpsAccuracy = aggregatedGps?.accuracy,
@@ -491,7 +922,7 @@ class LoggingService : Service(), SensorEventListener {
         )
     }
 
-    private fun aggregateGpsForSlot(slotTimestamp: Long, mode: Mode): AggregatedGpsPoint? {
+    private fun aggregateGpsForSlot(slotTimestamp: Long, gpsAggregationMode: GpsAggregationMode): AggregatedGpsPoint? {
         val slotSamples = synchronized(gpsPool) {
             val samples = mutableListOf<GpsSample>()
             while (gpsPool.isNotEmpty() && gpsPool.first().timestampMs <= slotTimestamp) {
@@ -500,18 +931,25 @@ class LoggingService : Service(), SensorEventListener {
             samples
         }
         if (slotSamples.isEmpty()) {
-            if (mode == Mode.DEVICE_STILL || mode == Mode.STOPPED) {
+            if (
+                gpsAggregationMode == GpsAggregationMode.DEVICE_STILL ||
+                gpsAggregationMode == GpsAggregationMode.STOPPED
+            ) {
                 reuseLastAcceptedGpsPoint(slotTimestamp)?.let { return it }
-                requestBootstrapLocationIfNeeded(mode)
+                requestBootstrapLocationIfNeeded(gpsAggregationMode)
             }
             return null
         }
-        val aggregated = when (mode) {
-            Mode.WALKING, Mode.VEHICLE -> aggregateMovingGps(slotTimestamp, slotSamples)
-            Mode.DEVICE_STILL -> averageGps(slotSamples, includeBefore = previousSlotMode == Mode.DEVICE_STILL)
-            Mode.STOPPED, Mode.UNKNOWN -> averageGps(
+        val aggregated = when (gpsAggregationMode) {
+            GpsAggregationMode.MOVING -> aggregateMovingGps(slotTimestamp, slotSamples)
+            GpsAggregationMode.DEVICE_STILL -> averageGps(
                 slotSamples,
-                includeBefore = previousSlotMode == Mode.DEVICE_STILL || previousSlotMode == Mode.STOPPED
+                includeBefore = previousGpsAggregationMode == GpsAggregationMode.DEVICE_STILL
+            )
+            GpsAggregationMode.STOPPED, GpsAggregationMode.UNKNOWN -> averageGps(
+                slotSamples,
+                includeBefore = previousGpsAggregationMode == GpsAggregationMode.DEVICE_STILL ||
+                    previousGpsAggregationMode == GpsAggregationMode.STOPPED
             )
         }
         lastAcceptedGpsPoint = aggregated
@@ -525,8 +963,12 @@ class LoggingService : Service(), SensorEventListener {
         return previous.copy(timestampMs = slotTimestamp)
     }
 
-    private fun requestBootstrapLocationIfNeeded(mode: Mode) {
-        if (mode != Mode.UNKNOWN && mode != Mode.DEVICE_STILL && mode != Mode.STOPPED) return
+    private fun requestBootstrapLocationIfNeeded(gpsAggregationMode: GpsAggregationMode) {
+        if (
+            gpsAggregationMode != GpsAggregationMode.UNKNOWN &&
+            gpsAggregationMode != GpsAggregationMode.DEVICE_STILL &&
+            gpsAggregationMode != GpsAggregationMode.STOPPED
+        ) return
         val now = System.currentTimeMillis()
         if (now - lastBootstrapGpsRequestMs < LoggingConfig.GPS_BOOTSTRAP_COOLDOWN_MS) return
         lastBootstrapGpsRequestMs = now
@@ -556,11 +998,12 @@ class LoggingService : Service(), SensorEventListener {
             return slotSamples.last().toAggregated()
         }
         val target = slotTimestamp.toDouble()
+        val xs = points.map { it.timestampMs.toDouble() }  // 一度だけ計算
         return AggregatedGpsPoint(
             timestampMs = slotTimestamp,
-            latitude = interpolateCubic(points.map { it.timestampMs.toDouble() }, points.map { it.latitude }, target),
-            longitude = interpolateCubic(points.map { it.timestampMs.toDouble() }, points.map { it.longitude }, target),
-            altitude = interpolateCubic(points.map { it.timestampMs.toDouble() }, points.map { it.altitude }, target),
+            latitude = interpolateCubic(xs, points.map { it.latitude }, target),
+            longitude = interpolateCubic(xs, points.map { it.longitude }, target),
+            altitude = getLatestAltitude(points.asReversed().firstNotNullOfOrNull { it.altitude }),
             accuracy = points.minOfOrNull { it.accuracy }
         )
     }
@@ -577,9 +1020,8 @@ class LoggingService : Service(), SensorEventListener {
             )
         }
         allPoints += slotSamples
-        return allPoints
-            .sortedBy { it.timestampMs }
-            .distinctBy { it.timestampMs }
+        // allPoints は構造上すでに時系列順（前スロットのpoint + gpsPool FIFO）
+        return allPoints.distinctBy { it.timestampMs }
     }
 
     private fun averageGps(slotSamples: List<GpsSample>, includeBefore: Boolean): AggregatedGpsPoint {
@@ -596,12 +1038,19 @@ class LoggingService : Service(), SensorEventListener {
             }
         }
         samples += slotSamples
+        // 3つの map を1パスに統合
+        var latSum = 0.0; var lonSum = 0.0; var accSum = 0.0; var latestAlt: Double? = null
+        for (s in samples) {
+            latSum += s.latitude; lonSum += s.longitude; accSum += s.accuracy
+            if (s.altitude != null) latestAlt = s.altitude
+        }
+        val n = samples.size.toDouble()
         return AggregatedGpsPoint(
             timestampMs = slotSamples.last().timestampMs,
-            latitude = samples.map { it.latitude }.average(),
-            longitude = samples.map { it.longitude }.average(),
-            altitude = samples.map { it.altitude }.average(),
-            accuracy = samples.map { it.accuracy }.average().toFloat()
+            latitude = latSum / n,
+            longitude = lonSum / n,
+            altitude = getLatestAltitude(latestAlt),
+            accuracy = (accSum / n).toFloat()
         )
     }
 
@@ -667,11 +1116,25 @@ class LoggingService : Service(), SensorEventListener {
         return y0 + (y1 - y0) * (target - x0) / (x1 - x0)
     }
 
+    @Synchronized
+    private fun getLatestAltitude(location: android.location.Location): Double? {
+        val altitude = if (location.hasAltitude()) location.altitude else null
+        return getLatestAltitude(altitude)
+    }
+
+    @Synchronized
+    private fun getLatestAltitude(altitude: Double?): Double? {
+        if (altitude != null && altitude.isFinite()) {
+            lastGpsAltitude = altitude
+        }
+        return lastGpsAltitude
+    }
+
     private fun GpsSample.toAggregated(): AggregatedGpsPoint = AggregatedGpsPoint(
         timestampMs = timestampMs,
         latitude = latitude,
         longitude = longitude,
-        altitude = altitude,
+        altitude = getLatestAltitude(altitude),
         accuracy = accuracy
     )
 
@@ -679,15 +1142,24 @@ class LoggingService : Service(), SensorEventListener {
         previousMode: Mode,
         snapshot: MotionStateSnapshot
     ): String {
-        val avgText = snapshot.kStatus.avg?.let { String.format("%.3f", it) } ?: "null"
-        val varText = snapshot.kStatus.variance?.let { String.format("%.4f", it) } ?: "null"
-        val regionText = snapshot.completedRegion?.let {
-            "${it.kind}, speed=${String.format("%.2f", it.averageSpeedKmh)}km/h"
+        val avgText = snapshot.stK.avg?.let { String.format("%.3f", it) } ?: "null"
+        val ratioText = snapshot.stK.directionalityRatio?.let { String.format("%.3f", it) } ?: "null"
+        val scalarText = snapshot.stK.scalarAvg?.let { String.format("%.3f", it) } ?: "null"
+        val varText = snapshot.stK.variance?.let { String.format("%.4f", it) } ?: "null"
+        val gpsSpeedText = snapshot.walkingSpeed.gpsSpeedKmh?.let { String.format("%.2f", it) } ?: "null"
+        val stepSpeedText = snapshot.walkingSpeed.stepSpeedKmh?.let { String.format("%.2f", it) } ?: "null"
+        val speedDiffText = snapshot.walkingSpeed.differenceKmh?.let { String.format("%.2f", it) } ?: "null"
+        val region = snapshot.completedRegion ?: snapshot.activeRegionEstimate
+        val regionText = region?.let {
+            "${it.kind}${if (snapshot.completedRegion != null) "" else "(active)"}, speed=${String.format("%.2f", it.averageSpeedKmh)}km/h"
         } ?: "none"
         return "MODE_CONFIRMED: $previousMode -> ${snapshot.finalMode} " +
-            "(k=${snapshot.kStatus.status}, rawK=${snapshot.kStatus.rawStatus}, " +
-            "w=${snapshot.wStatus.status}, avg=$avgText, var=$varText, " +
+            "(stK=${snapshot.stK.status}, rawStK=${snapshot.stK.rawStatus}, " +
+            "w=${snapshot.wStatus.status}, avg=$avgText, ratio=$ratioText, scalar=$scalarText, var=$varText, " +
+            "accelSource=${snapshot.stK.source}, " +
             "stepDeltaWindow=${snapshot.wStatus.stepDeltaWindow}, " +
+            "walkGpsSpeed=$gpsSpeedText, walkStepSpeed=$stepSpeedText, walkSpeedDiff=$speedDiffText, " +
+            "gpsAggregation=${snapshot.gpsAggregationMode}, " +
             "gpsIntervalSec=${snapshot.gpsSampling.intervalMs / 1000.0}, " +
             "gpsImmediate=${snapshot.gpsSampling.immediate}, constantRegion=$regionText)"
     }

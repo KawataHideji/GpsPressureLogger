@@ -1,6 +1,6 @@
 # Room 内部データ仕様書
 
-最終更新: 2026-04-16
+最終更新: 2026-04-20
 
 ## 1. 目的
 
@@ -129,27 +129,81 @@ Room は表示都合の派生値ではなく、できるだけ元の意味に近
 
 - `motion_samples.kStatus: String?`
   - nullable
-  - 新方式 k-status の確定値。`K1 / K2_K3 / K4`
+  - 互換列名。新方式では 3 秒スロット加速度状態 `stK` の値 `STK1 / STK2 / STK4` を保存する。旧値 `K1 / K2_K3 / K4` は互換解釈する
 
 - `motion_samples.kRawStatus: String?`
   - nullable
-  - ヒステリシス適用前の k-status 瞬間判定
+  - 互換列名。新方式では `stK` の raw 判定を保存する。現行の `stK` はスロット単位判定なので通常 `kStatus` と同じ
 
 - `motion_samples.kAvg: Float?`
   - nullable
-  - k-status 解析窓内の合成加速度平均
+  - `stK` 判定用に、前回 base_cycle から今回 base_cycle までの 3 軸線形加速度を可能なら世界座標へ変換したうえで軸ごとに平均し、その平均ベクトルのノルムを取った値
+
+- `motion_samples.kScalarAvg: Float?`
+  - nullable
+  - 3 秒スロットの各サンプル加速度ノルム平均
+
+- `motion_samples.kDirectionalityRatio: Float?`
+  - nullable
+  - `kAvg / kScalarAvg`
 
 - `motion_samples.kVariance: Float?`
   - nullable
-  - k-status 解析窓内の合成加速度分散
+  - `stK` 判定用に、前回 base_cycle から今回 base_cycle までの変換済み合成加速度ノルム分散
+
+- `motion_samples.kMaxMagnitude: Float?`
+  - nullable
+  - 3 秒スロット内の合成加速度ノルム最大値
 
 - `motion_samples.kConfidence: Float?`
   - nullable
-  - k-status 判定の参考信頼度
+  - `stK` 判定の参考信頼度
+
+- `motion_samples.kAccelSource: String?`
+  - nullable
+  - 3 秒スロットの加速度座標変換 source
+  - 値: `WORLD_ROTATION_VECTOR` / `WORLD_ACCEL_MAG` / `DEVICE` / `NORM_ONLY`
+
+- `motion_samples.trKStatus: String?`
+  - nullable
+  - 1 秒窓 `trK` の確定値。`ON / OFF`
+
+- `motion_samples.trKRawStatus: String?`
+  - nullable
+  - 1 秒窓 `trK` の raw 候補値。`ON / OFF`
+
+- `motion_samples.trKAvg: Float?`
+  - nullable
+  - 1 秒窓の 3 軸ベクトル平均ノルム
+
+- `motion_samples.trKScalarAvg: Float?`
+  - nullable
+  - 1 秒窓の各サンプル加速度ノルム平均
+
+- `motion_samples.trKDirectionalityRatio: Float?`
+  - nullable
+  - `trKAvg / trKScalarAvg`
+
+- `motion_samples.trKMaxMagnitude: Float?`
+  - nullable
+  - 1 秒窓内の合成加速度ノルム最大値
+
+- `motion_samples.trKHorizontalMaxMagnitude: Float?`
+  - nullable
+  - 1 秒窓内の水平面加速度最大値
+
+- `motion_samples.trKConfidence: Float?`
+  - nullable
+  - `trK` 判定の参考信頼度
+
+- `motion_samples.trKAccelSource: String?`
+  - nullable
+  - 1 秒窓 `trK` の加速度座標変換 source
+  - 値: `WORLD_ROTATION_VECTOR` / `WORLD_ACCEL_MAG` / `DEVICE` / `NORM_ONLY`
 
 - `motion_samples.wStatus: String?`
   - nullable
-  - 歩行状態。`W1 / W2`
+- 歩行状態。`W1 / W2`。現行判定では `stepDeltaWindow >= wStepDeltaThreshold` かつ最終歩行イベントから `walkingThresholdMs` 以内なら `W1`
 
 - `motion_samples.stepDeltaWindow: Int?`
   - nullable
@@ -166,6 +220,7 @@ Room は表示都合の派生値ではなく、できるだけ元の意味に近
 - `motion_samples.confirmedMode: String?`
   - nullable
   - 新方式で確定した `DEVICE_STILL / STOPPED / WALKING / VEHICLE / UNKNOWN`
+  - 確定キャッシュとして扱う。現在まで続く未確定領域の暫定 `DEVICE_STILL / STOPPED` は保存せず、表示時に確定ポイント以後だけ再構成する。
 
 - `motion_samples.constantRegionKind: String?`
   - nullable
@@ -209,6 +264,8 @@ Room は表示都合の派生値ではなく、できるだけ元の意味に近
 - `motion_samples` は主記録 `log_entries` と別に保存する
 - 主記録の復元可否に影響しない補助データとして扱う
 - 新方式では表示再構成の揺れを避けるため、確定モード `confirmedMode` も保存する
+- `confirmedMode` が保存された最後の行を表示側の確定ポイントとし、それ以前は確定キャッシュを優先する。それ以後だけ raw の `kStatus(stK) / wStatus / constantRegionKind` から暫定表示を導出する。
+- 加速度座標変換の source は `motion_samples.kAccelSource` に保存する。debug log の `accelSource` も実機調査用に維持する。
 - 主記録 `log_entries` の `timestamp` は現行実装では 3 秒スロットの終了時刻を採用する
 
 ## 5. 欠損値ルール
@@ -284,8 +341,21 @@ Room では欠損値を `null` とする。
 - `KStatus` -> `motion_samples.kStatus`
 - `KRawStatus` -> `motion_samples.kRawStatus`
 - `KAvg` -> `motion_samples.kAvg`
+- `KScalarAvg` -> `motion_samples.kScalarAvg`
+- `KDirectionalityRatio` -> `motion_samples.kDirectionalityRatio`
 - `KVariance` -> `motion_samples.kVariance`
+- `KMaxMagnitude` -> `motion_samples.kMaxMagnitude`
 - `KConfidence` -> `motion_samples.kConfidence`
+- `KAccelSource` -> `motion_samples.kAccelSource`
+- `TrKStatus` -> `motion_samples.trKStatus`
+- `TrKRawStatus` -> `motion_samples.trKRawStatus`
+- `TrKAvg` -> `motion_samples.trKAvg`
+- `TrKScalarAvg` -> `motion_samples.trKScalarAvg`
+- `TrKDirectionalityRatio` -> `motion_samples.trKDirectionalityRatio`
+- `TrKMaxMagnitude` -> `motion_samples.trKMaxMagnitude`
+- `TrKHorizontalMaxMagnitude` -> `motion_samples.trKHorizontalMaxMagnitude`
+- `TrKConfidence` -> `motion_samples.trKConfidence`
+- `TrKAccelSource` -> `motion_samples.trKAccelSource`
 - `WStatus` -> `motion_samples.wStatus`
 - `StepDeltaWindow` -> `motion_samples.stepDeltaWindow`
 - `GpsIntervalMs` -> `motion_samples.gpsIntervalMs`
@@ -312,7 +382,7 @@ CSV の空欄は Room では `null` として扱う。
 - グラフ補間結果
 - 移動平均値
 - 地図クラスタリング結果
-- 旧方式では最終的な移動モードラベルを常設保存しなかったが、新方式では `confirmedMode` として保存する
+- 旧方式では最終的な移動モードラベルを常設保存しなかったが、新方式では確定済みの移動モードラベルだけを `confirmedMode` として保存する
 
 これらは表示・集計時に導出する。
 
@@ -324,7 +394,9 @@ CSV の空欄は Room では `null` として扱う。
 - `stepCount` は `stepsDelta` へ移行済み
 - 欠損表現としての 0 使用は廃止済み
 - `MotionSample` と `motion_samples` テーブルを追加し、補助センサー判定ログを主記録と分離して保持する
-- Room version 7 から 8 への移行で、新方式の k/w-status、GPS 判定、確定モード列を追加する
+- Room version 7 から 8 への移行で、新方式の stK/w-status、GPS 判定、確定モード列を追加する。Room / CSV の列名は互換のため `kStatus` 系を維持する
+- Room version 10 で `motion_samples.kAccelSource` を追加し、3 秒スロットごとの加速度座標変換 source を保存する
+- Room version 11 で `motion_samples.kScalarAvg / kDirectionalityRatio / kMaxMagnitude / trK*` を追加し、3 秒 `stK` 指標と 1 秒 `trK` 指標の実測値を後から解析できるようにした
 - destructive migration は使用しない
 
 移行方針:

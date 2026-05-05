@@ -6,7 +6,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * (k1 or k2/k3) and w2 の区間を定速領域として管理する。
+ * (stK1 or stK2) and w2 の区間を定速領域として管理する。
  */
 class ConstantRegionTracker(
     private val paramsProvider: MotionStateParamsProvider
@@ -21,8 +21,8 @@ class ConstantRegionTracker(
         if (active) points += point
     }
 
-    fun update(timestampMs: Long, kStatus: KStatus, wStatus: WStatus): ConstantRegionResult? {
-        val shouldBeActive = kStatus != KStatus.K4 && wStatus == WStatus.W2
+    fun update(timestampMs: Long, stK: StKStatus, wStatus: WStatus): ConstantRegionResult? {
+        val shouldBeActive = stK != StKStatus.STK4 && wStatus == WStatus.W2
         lastCompleted = null
         when {
             shouldBeActive && !active -> {

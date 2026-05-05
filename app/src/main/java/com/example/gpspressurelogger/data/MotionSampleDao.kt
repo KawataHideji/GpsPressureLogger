@@ -21,8 +21,17 @@ interface MotionSampleDao {
     @Query("SELECT * FROM motion_samples WHERE timestamp >= :since ORDER BY timestamp DESC")
     fun getSince(since: Long): Flow<List<MotionSample>>
 
+    @Query("SELECT * FROM motion_samples WHERE timestamp >= :since ORDER BY timestamp DESC")
+    suspend fun getSinceOnce(since: Long): List<MotionSample>
+
     @Query("SELECT * FROM motion_samples WHERE timestamp >= :fromTs AND timestamp <= :toTs ORDER BY timestamp DESC")
     fun getBetween(fromTs: Long, toTs: Long): Flow<List<MotionSample>>
+
+    @Query("SELECT * FROM motion_samples WHERE timestamp >= :fromTs AND timestamp <= :toTs ORDER BY timestamp ASC")
+    fun getBetweenAsc(fromTs: Long, toTs: Long): Flow<List<MotionSample>>
+
+    @Query("SELECT * FROM motion_samples WHERE timestamp >= :fromTs AND timestamp < :toExclusiveTs ORDER BY timestamp ASC")
+    suspend fun getBetweenOnce(fromTs: Long, toExclusiveTs: Long): List<MotionSample>
 
     @Query("SELECT * FROM motion_samples ORDER BY timestamp DESC LIMIT 1")
     suspend fun getLatest(): MotionSample?

@@ -17,7 +17,6 @@ import android.widget.RemoteViews
 import com.example.gpspressurelogger.R
 import com.example.gpspressurelogger.data.AppDatabase
 import com.example.gpspressurelogger.data.LogEntry
-import com.example.gpspressurelogger.data.SettingsRepository
 import com.example.gpspressurelogger.ui.MainActivity
 import com.example.gpspressurelogger.util.ExportUtil
 import com.example.gpspressurelogger.util.GpsUtil
@@ -29,11 +28,13 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.ln
+import kotlin.math.roundToLong
 import kotlin.math.tan
 
 class MapWidgetReceiver : AppWidgetProvider() {
@@ -42,7 +43,24 @@ class MapWidgetReceiver : AppWidgetProvider() {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                ids.forEach { updateSingleWidget(context, manager, it, WidgetUpdateReason.HOST) }
+                ids.forEach { updateSingleWidget(context, manager, it, allowSignatureSkip = false) }
+            } finally {
+                pending.finish()
+            }
+        }
+    }
+
+    /** リサイズ時に新サイズで zoom を再計算して再描画 */
+    override fun onAppWidgetOptionsChanged(
+        context: Context,
+        appWidgetManager: AppWidgetManager,
+        appWidgetId: Int,
+        newOptions: android.os.Bundle
+    ) {
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                updateSingleWidget(context, appWidgetManager, appWidgetId, allowSignatureSkip = false)
             } finally {
                 pending.finish()
             }
@@ -52,13 +70,39 @@ class MapWidgetReceiver : AppWidgetProvider() {
     companion object {
         private const val TAG = "MapWidgetReceiver"
         private const val TILE_PX = 256
+        private val lastRenderSignatures = ConcurrentHashMap<Int, MapWidgetRenderSignature>()
+        private val baseMapCache = ConcurrentHashMap<Int, BaseMapCacheEntry>()
+
+        private data class MapWidgetRenderSignature(
+            val widgetId: Int,
+            val widthPx: Int,
+            val heightPx: Int,
+            val latestTimestamp: Long,
+            val entryCount: Int,
+            val motionSampleCount: Int,
+            val trackDigest: Long
+        )
+
+        private data class BaseMapSignature(
+            val widgetId: Int,
+            val widthPx: Int,
+            val heightPx: Int,
+            val zoomPermille: Int,
+            val centerPxXMilli: Long,
+            val centerPxYMilli: Long
+        )
+
+        private data class BaseMapCacheEntry(
+            val signature: BaseMapSignature,
+            val bitmap: Bitmap
+        )
 
         fun updateAll(context: Context) {
             val manager = AppWidgetManager.getInstance(context)
             val ids = manager.getAppWidgetIds(ComponentName(context, MapWidgetReceiver::class.java))
             if (ids.isEmpty()) return
             CoroutineScope(Dispatchers.IO).launch {
-                ids.forEach { updateSingleWidget(context, manager, it, WidgetUpdateReason.SERVICE) }
+                ids.forEach { updateSingleWidget(context, manager, it, allowSignatureSkip = true) }
             }
         }
 
@@ -66,10 +110,9 @@ class MapWidgetReceiver : AppWidgetProvider() {
             context: Context,
             manager: AppWidgetManager,
             widgetId: Int,
-            reason: WidgetUpdateReason
+            allowSignatureSkip: Boolean
         ) {
             try {
-                val settings = SettingsRepository(context)
                 val views = RemoteViews(context.packageName, R.layout.widget_map_layout)
                 bindOpenAppClick(
                     views,
@@ -77,16 +120,15 @@ class MapWidgetReceiver : AppWidgetProvider() {
                         context,
                         1001,
                         Intent(context, MainActivity::class.java).apply {
-                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            action = MainActivity.ACTION_OPEN_MAP
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                Intent.FLAG_ACTIVITY_SINGLE_TOP
                             putExtra(MainActivity.EXTRA_OPEN_SCREEN, MainActivity.SCREEN_MAP)
                         },
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                     )
                 )
-                if (!shouldRenderWidget(settings, reason)) {
-                    manager.partiallyUpdateAppWidget(widgetId, views)
-                    return
-                }
 
                 val db = AppDatabase.getInstance(context)
                 val since = GpsUtil.getLoggingStart(System.currentTimeMillis())
@@ -115,6 +157,23 @@ class MapWidgetReceiver : AppWidgetProvider() {
                 val normalizedEntries = GpsUtil.normalizeStopsForDisplay(entries, motionSamples)
                 val bounds = GpsUtil.calculateBounds(normalizedEntries)
                 val boundsText = bounds?.let { "lat=${it.minLat}..${it.maxLat},lon=${it.minLon}..${it.maxLon}" } ?: "none"
+                val signature = MapWidgetRenderSignature(
+                    widgetId = widgetId,
+                    widthPx = wPx,
+                    heightPx = hPx,
+                    latestTimestamp = latest?.timestamp ?: -1L,
+                    entryCount = normalizedEntries.size,
+                    motionSampleCount = motionSamples.size,
+                    trackDigest = trackDigest(normalizedEntries)
+                )
+                if (allowSignatureSkip && lastRenderSignatures[widgetId] == signature) {
+                    Log.d(
+                        TAG,
+                        "WIDGET_RENDER_SKIPPED: widgetId=$widgetId reason=signature_unchanged " +
+                            "latestTs=${signature.latestTimestamp} entries=${signature.entryCount}"
+                    )
+                    return
+                }
                 ExportUtil.writeVerboseDebugLog(
                     context,
                     "MAP_WIDGET_RENDER: widgetId=$widgetId rawEntries=${rawEntries.size} filteredEntries=${entries.size} " +
@@ -123,10 +182,15 @@ class MapWidgetReceiver : AppWidgetProvider() {
 
                 views.setImageViewBitmap(
                     R.id.widget_map_image,
-                    createMapBitmap(context, normalizedEntries, motionSamples, latest, wPx, hPx)
+                    createMapBitmap(context, widgetId, normalizedEntries, motionSamples, latest, wPx, hPx)
                 )
                 manager.updateAppWidget(widgetId, views)
-                settings.setMapWidgetLastRenderMs(System.currentTimeMillis())
+                lastRenderSignatures[widgetId] = signature
+                Log.d(
+                    TAG,
+                    "WIDGET_RENDERED: widgetId=$widgetId latestTs=${latest?.timestamp ?: -1} " +
+                        "entries=${entries.size} widthPx=$wPx heightPx=$hPx"
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Update Error", e)
             }
@@ -137,16 +201,14 @@ class MapWidgetReceiver : AppWidgetProvider() {
             views.setOnClickPendingIntent(R.id.widget_map_image, pendingIntent)
         }
 
-        private suspend fun shouldRenderWidget(
-            settings: SettingsRepository,
-            reason: WidgetUpdateReason
-        ): Boolean {
-            return WidgetRenderGate.shouldRender(
-                tag = TAG,
-                reason = reason,
-                intervalSec = settings.mapWidgetIntervalMin.first(),
-                lastRenderMs = settings.mapWidgetLastRenderMs.first()
-            )
+        private fun trackDigest(entries: List<LogEntry>): Long {
+            var hash = 17L
+            entries.forEach { entry ->
+                hash = 31L * hash + entry.timestamp
+                hash = 31L * hash + ((entry.latitude ?: 0.0) * 1_000_000.0).roundToLong()
+                hash = 31L * hash + ((entry.longitude ?: 0.0) * 1_000_000.0).roundToLong()
+            }
+            return hash
         }
 
         private fun latToY(lat: Double): Double {
@@ -165,12 +227,14 @@ class MapWidgetReceiver : AppWidgetProvider() {
         }
 
         private fun calculateBestZoom(minLat: Double, maxLat: Double, minLon: Double, maxLon: Double, wPx: Int, hPx: Int): Double {
-            val margin = 1.20
+            // margin = 1.05 → トラックがウィジェットの 95% を占める（以前の 1.20 は 83% で小さすぎた）
+            val margin = 1.05
             val dLon = abs(maxLon - minLon).coerceAtLeast(0.0001) * margin
             val zLon = ln((wPx * 360.0) / (dLon * TILE_PX)) / ln(2.0)
             val dY = abs(latToY(maxLat) - latToY(minLat)).coerceAtLeast(0.000001) * margin
             val zLat = ln(hPx / (dY * TILE_PX)) / ln(2.0)
-            return minOf(zLon, zLat).coerceIn(10.0, 18.5)
+            // 下限を 8.0 に下げる（広域トラックで自然ズームが 9 未満になる場合に対応）
+            return minOf(zLon, zLat).coerceIn(8.0, 18.5)
         }
 
         private fun fetchTile(context: Context, zoom: Int, x: Int, y: Int): Bitmap? {
@@ -197,9 +261,10 @@ class MapWidgetReceiver : AppWidgetProvider() {
             }
         }
 
-        fun createMapBitmap(context: Context, entries: List<LogEntry>, motionSamples: List<com.example.gpspressurelogger.data.MotionSample>, latest: LogEntry?, wPx: Int, hPx: Int): Bitmap {
+        fun createMapBitmap(context: Context, widgetId: Int, entries: List<LogEntry>, motionSamples: List<com.example.gpspressurelogger.data.MotionSample>, latest: LogEntry?, wPx: Int, hPx: Int): Bitmap {
             val bmp = Bitmap.createBitmap(wPx, hPx, Bitmap.Config.RGB_565)
             val canvas = Canvas(bmp)
+            val density = context.resources.displayMetrics.density
             val centerLat: Double
             val centerLon: Double
             val zoom: Double
@@ -234,32 +299,40 @@ class MapWidgetReceiver : AppWidgetProvider() {
             val tOY = hPx / 2.0 - (cpyB - cyT * TILE_PX) * fScale
             val n = 1 shl baseZoom
 
-            canvas.drawColor(Color.parseColor("#121E30"))
-            val tXC = (wPx / (TILE_PX * fScale) / 2).toInt() + 2
-            val tYC = (hPx / (TILE_PX * fScale) / 2).toInt() + 2
-            for (dy in -tYC..tYC) {
-                for (dx in -tXC..tXC) {
-                    val tx = cxT + dx
-                    val ty = cyT + dy
-                    if (tx < 0 || ty < 0 || tx >= n || ty >= n) continue
-                    val tX = (tOX + dx * TILE_PX * fScale).toFloat()
-                    val tY = (tOY + dy * TILE_PX * fScale).toFloat()
-                    if (tX + TILE_PX * fScale < 0 || tX > wPx || tY + TILE_PX * fScale < 0 || tY > hPx) continue
-                    val tile = fetchTile(context, baseZoom, tx, ty)
-                    if (tile != null) {
-                        val dest = android.graphics.RectF(tX, tY, (tX + TILE_PX * fScale).toFloat(), (tY + TILE_PX * fScale).toFloat())
-                        canvas.drawBitmap(tile, null, dest, null)
-                    }
-                }
-            }
+            val baseMapSignature = BaseMapSignature(
+                widgetId = widgetId,
+                widthPx = wPx,
+                heightPx = hPx,
+                zoomPermille = (zoom * 1000.0).roundToLong().toInt(),
+                centerPxXMilli = (cpx * 1000.0).roundToLong(),
+                centerPxYMilli = (cpy * 1000.0).roundToLong()
+            )
+            val baseMapBitmap = obtainBaseMapBitmap(
+                context = context,
+                signature = baseMapSignature,
+                baseZoom = baseZoom,
+                scale = fScale,
+                centerTileX = cxT,
+                centerTileY = cyT,
+                tileOffsetX = tOX,
+                tileOffsetY = tOY,
+                tileLimit = n,
+                widthPx = wPx,
+                heightPx = hPx
+            )
+            canvas.drawBitmap(baseMapBitmap, 0f, 0f, null)
 
             if (entries.isNotEmpty()) {
                 val polylineTrack = GpsUtil.buildDisplayPolyline(entries, motionSamples)
                 val polylineSegments = GpsUtil.splitTrackByMode(polylineTrack)
-                val directionMarkers = GpsUtil.computeDirectionArrowMarkers(polylineTrack)
+                val directionMarkers = GpsUtil.computeDirectionArrowMarkersOnScreen(
+                    track = polylineTrack,
+                    projectToScreen = { point -> toCanvas(point.lat, point.lon) },
+                    params = GpsUtil.widgetDirectionArrowParams(density)
+                )
                 val stopMarkers = GpsUtil.clusterStops(entries)
                 val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    strokeWidth = 7f
+                    strokeWidth = GpsUtil.mapTrackStrokeWidthPx(GpsUtil.MarkerSurface.WIDGET, density)
                     style = Paint.Style.STROKE
                     strokeCap = Paint.Cap.ROUND
                     strokeJoin = Paint.Join.ROUND
@@ -278,12 +351,12 @@ class MapWidgetReceiver : AppWidgetProvider() {
                 val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                     textAlign = Paint.Align.CENTER
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
-                    textSize = GpsUtil.directionArrowTextSize(GpsUtil.MarkerSurface.WIDGET)
+                    textSize = GpsUtil.widgetDirectionArrowTextSize(density)
                 }
                 val arrowOutlinePaint = Paint(arrowPaint).apply {
                     color = Color.WHITE
                     style = Paint.Style.STROKE
-                    strokeWidth = GpsUtil.directionArrowOutlineWidth(GpsUtil.MarkerSurface.WIDGET)
+                    strokeWidth = GpsUtil.widgetDirectionArrowOutlineWidth(density)
                     strokeJoin = Paint.Join.ROUND
                     strokeMiter = 10f
                 }
@@ -301,7 +374,7 @@ class MapWidgetReceiver : AppWidgetProvider() {
                 val markerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
                 stopMarkers.filter { it.isStop }.forEach { pt ->
                     val (cx, cy) = toCanvas(pt.lat, pt.lon)
-                    val style = GpsUtil.stopMarkerStyle(pt.stopCount, GpsUtil.MarkerSurface.WIDGET)
+                    val style = GpsUtil.widgetStopMarkerStyle(pt.stopCount, density)
                     markerPaint.style = Paint.Style.FILL
                     markerPaint.color = Color.WHITE
                     canvas.drawCircle(cx, cy, style.outerRadiusPx, markerPaint)
@@ -311,7 +384,7 @@ class MapWidgetReceiver : AppWidgetProvider() {
 
                 val start = entries.first()
                 val (sx, sy) = toCanvas(start.latitude ?: return bmp, start.longitude ?: return bmp)
-                val startStyle = GpsUtil.startMarkerStyle(GpsUtil.MarkerSurface.WIDGET)
+                val startStyle = GpsUtil.widgetStartMarkerStyle(density)
                 markerPaint.style = Paint.Style.FILL
                 markerPaint.color = Color.WHITE
                 canvas.drawCircle(sx, sy, startStyle.outerRadiusPx, markerPaint)
@@ -322,7 +395,7 @@ class MapWidgetReceiver : AppWidgetProvider() {
 
                 val latestPt = entries.last()
                 val (lx, ly) = toCanvas(latestPt.latitude ?: return bmp, latestPt.longitude ?: return bmp)
-                val currentStyle = GpsUtil.currentMarkerStyle(GpsUtil.MarkerSurface.WIDGET)
+                val currentStyle = GpsUtil.widgetCurrentMarkerStyle(density)
                 markerPaint.style = Paint.Style.FILL
                 markerPaint.color = Color.WHITE
                 canvas.drawCircle(lx, ly, currentStyle.outerRadiusPx, markerPaint)
@@ -332,6 +405,63 @@ class MapWidgetReceiver : AppWidgetProvider() {
                 canvas.drawCircle(lx, ly, currentStyle.innerRadiusPx, markerPaint)
             }
             return bmp
+        }
+
+        private fun obtainBaseMapBitmap(
+            context: Context,
+            signature: BaseMapSignature,
+            baseZoom: Int,
+            scale: Double,
+            centerTileX: Int,
+            centerTileY: Int,
+            tileOffsetX: Double,
+            tileOffsetY: Double,
+            tileLimit: Int,
+            widthPx: Int,
+            heightPx: Int
+        ): Bitmap {
+            val cached = baseMapCache[signature.widgetId]
+            if (cached != null && cached.signature == signature && !cached.bitmap.isRecycled) {
+                Log.d(
+                    TAG,
+                    "WIDGET_BASEMAP_CACHE_HIT: widgetId=${signature.widgetId} zoom=${signature.zoomPermille} " +
+                        "centerPx=${signature.centerPxXMilli},${signature.centerPxYMilli}"
+                )
+                return cached.bitmap
+            }
+
+            val background = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.RGB_565)
+            val backgroundCanvas = Canvas(background)
+            backgroundCanvas.drawColor(Color.parseColor("#121E30"))
+            val tileXCount = (widthPx / (TILE_PX * scale) / 2).toInt() + 2
+            val tileYCount = (heightPx / (TILE_PX * scale) / 2).toInt() + 2
+            for (dy in -tileYCount..tileYCount) {
+                for (dx in -tileXCount..tileXCount) {
+                    val tileX = centerTileX + dx
+                    val tileY = centerTileY + dy
+                    if (tileX < 0 || tileY < 0 || tileX >= tileLimit || tileY >= tileLimit) continue
+                    val drawX = (tileOffsetX + dx * TILE_PX * scale).toFloat()
+                    val drawY = (tileOffsetY + dy * TILE_PX * scale).toFloat()
+                    if (drawX + TILE_PX * scale < 0 || drawX > widthPx || drawY + TILE_PX * scale < 0 || drawY > heightPx) continue
+                    val tile = fetchTile(context, baseZoom, tileX, tileY)
+                    if (tile != null) {
+                        val dest = android.graphics.RectF(
+                            drawX,
+                            drawY,
+                            (drawX + TILE_PX * scale).toFloat(),
+                            (drawY + TILE_PX * scale).toFloat()
+                        )
+                        backgroundCanvas.drawBitmap(tile, null, dest, null)
+                    }
+                }
+            }
+            baseMapCache[signature.widgetId] = BaseMapCacheEntry(signature, background)
+            Log.d(
+                TAG,
+                "WIDGET_BASEMAP_CACHE_MISS: widgetId=${signature.widgetId} zoom=${signature.zoomPermille} " +
+                    "centerPx=${signature.centerPxXMilli},${signature.centerPxYMilli}"
+            )
+            return background
         }
     }
 }

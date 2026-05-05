@@ -3,7 +3,12 @@ package com.example.gpspressurelogger.util
 import com.example.gpspressurelogger.data.LogEntry
 import com.example.gpspressurelogger.data.MotionSample
 import com.example.gpspressurelogger.sensor.ConstantRegionKind
+import com.example.gpspressurelogger.sensor.FinalContextResolver
 import com.example.gpspressurelogger.sensor.MovementDetector
+import com.example.gpspressurelogger.sensor.MotionStateParams
+import com.example.gpspressurelogger.sensor.StKStatus
+import com.example.gpspressurelogger.sensor.TrKStatus
+import com.example.gpspressurelogger.sensor.WalkingSpeedSnapshot
 import java.util.Calendar
 import kotlin.math.*
 
@@ -33,6 +38,9 @@ object GpsUtil {
     private const val ISOLATED_CLUSTER_MAX_DURATION_MS = 4 * 60_000L
     private const val ISOLATED_CLUSTER_MAX_POINTS = 24
     private const val DISPLAY_SMOOTHING_WINDOW_RADIUS = 2
+    private const val MAP_SPLINE_SAMPLES_PER_SEGMENT = 5
+    private const val MAP_SPLINE_EDGE_LINEAR_SEGMENTS = 0
+    private const val MAP_SPLINE_TENSION = 0.55
     private const val STOP_NORMALIZATION_MIN_DURATION_MS = 2 * 60_000L
     private const val STOP_NORMALIZATION_MIN_POINT_COUNT = 8
     private const val CLUSTER_HOP_DISTANCE_M = 180.0
@@ -52,6 +60,8 @@ object GpsUtil {
     private const val MARKER_RING_STROKE_WIDTH_PX = 5f
     private const val CURRENT_MARKER_OUTER_RADIUS_PX = 14f
     private const val CURRENT_MARKER_INNER_RADIUS_PX = 10f
+    private const val APP_MAP_TRACK_STROKE_WIDTH_DP = 4.0f
+    private const val WIDGET_MAP_TRACK_STROKE_WIDTH_DP = 2.2f
     
     private const val APP_MAP_MARKER_SCALE = 1.25f
     private const val WIDGET_MARKER_SCALE = 1.0f
@@ -62,6 +72,23 @@ object GpsUtil {
     private const val DIRECTION_ARROW_TEXT_SIZE_PX = 24f
     private const val DIRECTION_ARROW_BITMAP_PADDING_PX = 10f
     private const val DIRECTION_ARROW_OUTLINE_WIDTH_PX = 4f
+    private const val APP_DIRECTION_ARROW_MIN_SPACING_DP = 36f
+    private const val APP_DIRECTION_ARROW_MIN_SEGMENT_DP = 12f
+    private const val APP_DIRECTION_ARROW_START_END_SKIP_DP = 18f
+    private const val WIDGET_DIRECTION_ARROW_MIN_SPACING_DP = 44f
+    private const val WIDGET_DIRECTION_ARROW_MIN_SEGMENT_DP = 12f
+    private const val WIDGET_DIRECTION_ARROW_START_END_SKIP_DP = 18f
+    private const val WIDGET_STOP_MARKER_OUTER_RADIUS_DP = 4f
+    private const val WIDGET_STOP_MARKER_MAX_EXTRA_RADIUS_DP = 1.2f
+    private const val WIDGET_START_MARKER_OUTER_RADIUS_DP = 5.5f
+    private const val WIDGET_START_MARKER_INNER_RADIUS_DP = 4f
+    private const val WIDGET_MARKER_RING_STROKE_WIDTH_DP = 2f
+    private const val WIDGET_CURRENT_MARKER_OUTER_RADIUS_DP = 5.5f
+    private const val WIDGET_CURRENT_MARKER_INNER_RADIUS_DP = 4f
+    private const val WIDGET_DIRECTION_ARROW_TEXT_SIZE_DP = 8.5f
+    private const val WIDGET_DIRECTION_ARROW_BITMAP_PADDING_DP = 3.5f
+    private const val WIDGET_DIRECTION_ARROW_OUTLINE_WIDTH_DP = 1.4f
+    private val DISPLAY_MOTION_PARAMS = MotionStateParams()
 
     const val MODE_COLOR_DEVICE_STILL = 0xFF000000.toInt()
     const val MODE_COLOR_STOPPED = 0xFF8E96A8.toInt()
@@ -78,6 +105,13 @@ object GpsUtil {
         val minSpacingM: Double = DIRECTION_ARROW_MIN_SPACING_M,
         val minSegmentM: Double = DIRECTION_ARROW_MIN_SEGMENT_M,
         val startEndSkipM: Double = DIRECTION_ARROW_START_END_SKIP_M,
+        val localBearingWindow: Int = DIRECTION_ARROW_LOCAL_BEARING_WINDOW
+    )
+
+    data class ScreenDirectionArrowParams(
+        val minSpacingPx: Float,
+        val minSegmentPx: Float,
+        val startEndSkipPx: Float,
         val localBearingWindow: Int = DIRECTION_ARROW_LOCAL_BEARING_WINDOW
     )
 
@@ -123,6 +157,10 @@ object GpsUtil {
         val stepsDelta: Int,
         val displayMode: MovementDetector.Mode,
         val constantRegionKind: ConstantRegionKind? = null,
+        val constantRegionStartLat: Double? = null,
+        val constantRegionStartLon: Double? = null,
+        val constantRegionEndLat: Double? = null,
+        val constantRegionEndLon: Double? = null,
         val constantRegionStayLat: Double? = null,
         val constantRegionStayLon: Double? = null,
         val returnBurstFixed: Boolean = false,
@@ -133,6 +171,10 @@ object GpsUtil {
         val timestamp: Long,
         val confirmedMode: MovementDetector.Mode,
         val constantRegionKind: ConstantRegionKind?,
+        val constantRegionStartLat: Double? = null,
+        val constantRegionStartLon: Double? = null,
+        val constantRegionEndLat: Double? = null,
+        val constantRegionEndLon: Double? = null,
         val constantRegionStayLat: Double?,
         val constantRegionStayLon: Double?
     )
@@ -476,7 +518,7 @@ object GpsUtil {
     ): List<LogEntry> {
         if (entries.isEmpty() || motionSamples.isEmpty()) return entries
 
-        val modeStates = inferModeStates(motionSamples.sortedBy { it.timestamp })
+        val modeStates = inferModeStates(motionSamples.sortedBy { it.timestamp }, entries)
         if (modeStates.isEmpty()) return entries
 
         val displayPoints = buildDisplayPoints(entries, modeStates)
@@ -523,7 +565,7 @@ object GpsUtil {
             }
         }
 
-        val stayCollapsedPoints = collapseStayRegions(normalizedPoints)
+        val stayCollapsedPoints = collapseConstantRegions(normalizedPoints)
         val correctedEntries = entries.toMutableList()
         stayCollapsedPoints.forEach { point ->
             val original = correctedEntries[point.sourceIndex]
@@ -560,8 +602,8 @@ object GpsUtil {
         val timestamp: Long,
         val distRatio: Float,
         val displayMode: MovementDetector.Mode = MovementDetector.Mode.UNKNOWN,
-        val isStop: Boolean = false, // 滞在地点（重心）
-        val stopCount: Int  = 0
+        val isStop: Boolean = false, // STAY 領域を stay point 1 点へ畳んだ代表点
+        val stopCount: Int = 0
     )
 
     data class TrackSegment(
@@ -648,6 +690,8 @@ object GpsUtil {
         strokeWidthPx = strokeWidthPx * scale
     )
 
+    private fun dpToPx(dp: Float, density: Float): Float = dp * density.coerceAtLeast(1f)
+
     fun stopMarkerStyle(stopCount: Int, surface: MarkerSurface): MarkerStyle {
         val extraRadius = (stopCount / STOP_MARKER_POINTS_PER_STEP)
             .coerceAtMost(STOP_MARKER_MAX_EXTRA_RADIUS_PX.toInt())
@@ -679,6 +723,58 @@ object GpsUtil {
 
     fun directionArrowOutlineWidth(surface: MarkerSurface): Float =
         DIRECTION_ARROW_OUTLINE_WIDTH_PX * markerScale(surface)
+
+    fun widgetDirectionArrowParams(density: Float): ScreenDirectionArrowParams = ScreenDirectionArrowParams(
+        minSpacingPx = dpToPx(WIDGET_DIRECTION_ARROW_MIN_SPACING_DP, density),
+        minSegmentPx = dpToPx(WIDGET_DIRECTION_ARROW_MIN_SEGMENT_DP, density),
+        startEndSkipPx = dpToPx(WIDGET_DIRECTION_ARROW_START_END_SKIP_DP, density)
+    )
+
+    fun appDirectionArrowParams(density: Float): ScreenDirectionArrowParams = ScreenDirectionArrowParams(
+        minSpacingPx = dpToPx(APP_DIRECTION_ARROW_MIN_SPACING_DP, density),
+        minSegmentPx = dpToPx(APP_DIRECTION_ARROW_MIN_SEGMENT_DP, density),
+        startEndSkipPx = dpToPx(APP_DIRECTION_ARROW_START_END_SKIP_DP, density)
+    )
+
+    fun widgetStopMarkerStyle(stopCount: Int, density: Float): MarkerStyle {
+        val extraRadius = (stopCount / STOP_MARKER_POINTS_PER_STEP)
+            .coerceAtMost(max(0, WIDGET_STOP_MARKER_MAX_EXTRA_RADIUS_DP.toInt()))
+            .toFloat()
+        val outerDp = WIDGET_STOP_MARKER_OUTER_RADIUS_DP + extraRadius
+        return MarkerStyle(
+            outerRadiusPx = dpToPx(outerDp, density),
+            innerRadiusPx = dpToPx((outerDp - 1.2f).coerceAtLeast(2.4f), density)
+        )
+    }
+
+    fun widgetStartMarkerStyle(density: Float): MarkerStyle = MarkerStyle(
+        outerRadiusPx = dpToPx(WIDGET_START_MARKER_OUTER_RADIUS_DP, density),
+        innerRadiusPx = dpToPx(WIDGET_START_MARKER_INNER_RADIUS_DP, density),
+        strokeWidthPx = dpToPx(WIDGET_MARKER_RING_STROKE_WIDTH_DP, density)
+    )
+
+    fun widgetCurrentMarkerStyle(density: Float): MarkerStyle = MarkerStyle(
+        outerRadiusPx = dpToPx(WIDGET_CURRENT_MARKER_OUTER_RADIUS_DP, density),
+        innerRadiusPx = dpToPx(WIDGET_CURRENT_MARKER_INNER_RADIUS_DP, density),
+        strokeWidthPx = dpToPx(WIDGET_MARKER_RING_STROKE_WIDTH_DP, density)
+    )
+
+    fun widgetDirectionArrowTextSize(density: Float): Float =
+        dpToPx(WIDGET_DIRECTION_ARROW_TEXT_SIZE_DP, density)
+
+    fun widgetDirectionArrowBitmapPadding(density: Float): Float =
+        dpToPx(WIDGET_DIRECTION_ARROW_BITMAP_PADDING_DP, density)
+
+    fun widgetDirectionArrowOutlineWidth(density: Float): Float =
+        dpToPx(WIDGET_DIRECTION_ARROW_OUTLINE_WIDTH_DP, density)
+
+    fun mapTrackStrokeWidthPx(surface: MarkerSurface, density: Float): Float {
+        val widthDp = when (surface) {
+            MarkerSurface.APP_MAP -> APP_MAP_TRACK_STROKE_WIDTH_DP
+            MarkerSurface.WIDGET -> WIDGET_MAP_TRACK_STROKE_WIDTH_DP
+        }
+        return widthDp * density.coerceAtLeast(1f)
+    }
 
     fun modeColor(mode: MovementDetector.Mode): Int = when (mode) {
         MovementDetector.Mode.DEVICE_STILL -> MODE_COLOR_DEVICE_STILL
@@ -728,9 +824,9 @@ object GpsUtil {
     }
 
     /**
-     * viewer の GPS 平準化 ON と揃えるための、折れ線表示専用系列。
-     * 停止補正済みの GPS 点列へ直接移動平均をかけ、連続折れ線として返す。
-     * 停止点集約は滞在マーカー専用に分離する。
+     * viewer の GPS 平準化 ON と揃えるための、地図表示専用系列。
+     * STAY 領域は記録済み stay point 1 点へ畳み、CONSTANT_MOVE は記録点をそのまま使う。
+     * その後、STAY を境界にした移動チャンクをスプライン補間する。
      */
     fun buildDisplayPolyline(
         entries: List<LogEntry>,
@@ -740,12 +836,24 @@ object GpsUtil {
         val locatedEntries = entries.filter { it.hasLocation }
         if (locatedEntries.isEmpty()) return emptyList()
 
-        val modeTimeline = inferDisplayModes(motionSamples)
+        val modeStates = inferModeStates(motionSamples.sortedBy { it.timestamp }, entries)
+        val baseTrack = if (modeStates.isNotEmpty()) {
+            val displayPoints = buildDisplayPoints(locatedEntries, modeStates)
+            displayPointsToTrack(collapseConstantRegions(displayPoints))
+        } else {
+            rawEntriesToTrack(locatedEntries)
+        }
+        val smoothedTrack = smoothPolylineTrack(baseTrack, windowRadius)
+        return splineMovingTrack(smoothedTrack)
+    }
+
+    private fun rawEntriesToTrack(locatedEntries: List<LogEntry>): List<TrackPoint> {
+        val modeTimeline = emptyList<DisplayModeSample>()
         var modeIndex = 0
         var currentMode = MovementDetector.Mode.UNKNOWN
         val cumulativeDistances = cumulativeDistances(locatedEntries)
         val totalDistance = cumulativeDistances.last().coerceAtLeast(1.0)
-        val baseTrack = locatedEntries.mapIndexed { index, entry ->
+        return locatedEntries.mapIndexed { index, entry ->
             while (modeIndex < modeTimeline.size && modeTimeline[modeIndex].timestamp <= entry.timestamp) {
                 currentMode = modeTimeline[modeIndex].mode
                 modeIndex += 1
@@ -758,11 +866,42 @@ object GpsUtil {
                 displayMode = currentMode
             )
         }
+    }
+
+    private fun displayPointsToTrack(points: List<DisplayPoint>): List<TrackPoint> {
+        if (points.isEmpty()) return emptyList()
+        val cumulativeDistances = mutableListOf(0.0)
+        for (index in 1 until points.size) {
+            cumulativeDistances += cumulativeDistances.last() +
+                haversineM(points[index - 1].lat, points[index - 1].lon, points[index].lat, points[index].lon)
+        }
+        val totalDistance = cumulativeDistances.last().coerceAtLeast(1.0)
+        return points.mapIndexed { index, point ->
+            TrackPoint(
+                lat = point.lat,
+                lon = point.lon,
+                timestamp = point.timestamp,
+                distRatio = (cumulativeDistances[index] / totalDistance).toFloat(),
+                displayMode = point.displayMode,
+                isStop = point.constantRegionKind == ConstantRegionKind.STAY
+            )
+        }
+    }
+
+    private fun smoothPolylineTrack(baseTrack: List<TrackPoint>, windowRadius: Int): List<TrackPoint> {
         if (baseTrack.size < windowRadius * 2 + 1 || windowRadius <= 0) return baseTrack
 
         val smoothed = baseTrack.toMutableList()
         for (index in windowRadius until baseTrack.size - windowRadius) {
             val neighbors = baseTrack.subList(index - windowRadius, index + windowRadius + 1)
+            val currentMode = baseTrack[index].displayMode
+            if (
+                baseTrack[index].isStop ||
+                currentMode == MovementDetector.Mode.VEHICLE ||
+                neighbors.any { it.isStop || it.displayMode != currentMode }
+            ) {
+                continue
+            }
             smoothed[index] = baseTrack[index].copy(
                 lat = neighbors.map { it.lat }.average(),
                 lon = neighbors.map { it.lon }.average()
@@ -771,36 +910,230 @@ object GpsUtil {
         return smoothed
     }
 
+    private data class LocalPointM(
+        val x: Double,
+        val y: Double
+    )
+
+    private fun splineMovingTrack(
+        track: List<TrackPoint>,
+        samplesPerSegment: Int = MAP_SPLINE_SAMPLES_PER_SEGMENT
+    ): List<TrackPoint> {
+        if (track.size < 3 || samplesPerSegment <= 0) return track
+
+        val result = mutableListOf<TrackPoint>()
+        var index = 0
+        while (index < track.size) {
+            if (track[index].isStop) {
+                result += track[index]
+                index += 1
+                continue
+            }
+
+            val chunkMode = track[index].displayMode
+            var endExclusive = index + 1
+            while (
+                endExclusive < track.size &&
+                !track[endExclusive].isStop &&
+                track[endExclusive].displayMode == chunkMode
+            ) {
+                endExclusive += 1
+            }
+
+            val chunk = track.subList(index, endExclusive)
+            result.addAll(
+                splineTrackChunk(chunk, samplesPerSegment)
+            )
+            index = endExclusive
+        }
+        return result
+    }
+
+    private fun splineTrackChunk(
+        chunk: List<TrackPoint>,
+        samplesPerSegment: Int,
+        edgeLinearSegments: Int = MAP_SPLINE_EDGE_LINEAR_SEGMENTS
+    ): List<TrackPoint> {
+        if (chunk.size < 3) return chunk
+
+        val originLat = chunk.first().lat
+        val originLon = chunk.first().lon
+        val projected = chunk.map { projectToLocalMeters(it.lat, it.lon, originLat, originLon) }
+        val result = mutableListOf<TrackPoint>()
+        result += chunk.first()
+        val segmentCount = chunk.size - 1
+        val splineStartSegment = edgeLinearSegments.coerceAtLeast(0)
+        val splineEndExclusive = (segmentCount - edgeLinearSegments.coerceAtLeast(0)).coerceAtLeast(splineStartSegment)
+
+        for (index in 0 until chunk.lastIndex) {
+            val p0 = projected[max(0, index - 1)]
+            val p1 = projected[index]
+            val p2 = projected[index + 1]
+            val p3 = projected[min(chunk.lastIndex, index + 2)]
+            val start = chunk[index]
+            val end = chunk[index + 1]
+            val useSpline = index in splineStartSegment until splineEndExclusive
+
+            if (useSpline) {
+                for (sample in 1..samplesPerSegment) {
+                    val t = sample.toDouble() / (samplesPerSegment + 1)
+                    val local = catmullRom(p0, p1, p2, p3, t, MAP_SPLINE_TENSION)
+                    val (lat, lon) = unprojectFromLocalMeters(local, originLat, originLon)
+                    result += start.copy(
+                        lat = lat,
+                        lon = lon,
+                        timestamp = interpolateLong(start.timestamp, end.timestamp, t),
+                        distRatio = interpolateFloat(start.distRatio, end.distRatio, t),
+                        displayMode = start.displayMode,
+                        isStop = false
+                    )
+                }
+            }
+            result += end
+        }
+
+        return result
+    }
+
+    private fun projectToLocalMeters(lat: Double, lon: Double, originLat: Double, originLon: Double): LocalPointM {
+        val metersPerDegreeLat = 111_320.0
+        val metersPerDegreeLon = metersPerDegreeLat * cos(Math.toRadians(originLat)).coerceAtLeast(0.000001)
+        return LocalPointM(
+            x = (lon - originLon) * metersPerDegreeLon,
+            y = (lat - originLat) * metersPerDegreeLat
+        )
+    }
+
+    private fun unprojectFromLocalMeters(point: LocalPointM, originLat: Double, originLon: Double): Pair<Double, Double> {
+        val metersPerDegreeLat = 111_320.0
+        val metersPerDegreeLon = metersPerDegreeLat * cos(Math.toRadians(originLat)).coerceAtLeast(0.000001)
+        return Pair(
+            originLat + point.y / metersPerDegreeLat,
+            originLon + point.x / metersPerDegreeLon
+        )
+    }
+
+    private fun catmullRom(
+        p0: LocalPointM,
+        p1: LocalPointM,
+        p2: LocalPointM,
+        p3: LocalPointM,
+        t: Double,
+        tension: Double
+    ): LocalPointM {
+        val t2 = t * t
+        val t3 = t2 * t
+        val tangentScale = (1.0 - tension).coerceIn(0.0, 1.0)
+        val m1x = tangentScale * (p2.x - p0.x)
+        val m1y = tangentScale * (p2.y - p0.y)
+        val m2x = tangentScale * (p3.x - p1.x)
+        val m2y = tangentScale * (p3.y - p1.y)
+        return LocalPointM(
+            x =
+                (2.0 * t3 - 3.0 * t2 + 1.0) * p1.x +
+                    (t3 - 2.0 * t2 + t) * m1x +
+                    (-2.0 * t3 + 3.0 * t2) * p2.x +
+                    (t3 - t2) * m2x,
+            y =
+                (2.0 * t3 - 3.0 * t2 + 1.0) * p1.y +
+                    (t3 - 2.0 * t2 + t) * m1y +
+                    (-2.0 * t3 + 3.0 * t2) * p2.y +
+                    (t3 - t2) * m2y
+        )
+    }
+
+    private fun interpolateLong(start: Long, end: Long, t: Double): Long =
+        (start + (end - start) * t).toLong()
+
+    private fun interpolateFloat(start: Float, end: Float, t: Double): Float =
+        (start + (end - start) * t).toFloat()
+
     fun splitTrackByMode(track: List<TrackPoint>): List<TrackSegment> {
         if (track.size < 2) return emptyList()
         val segments = mutableListOf<TrackSegment>()
-        var currentMode = track.first().displayMode
-        var currentPoints = mutableListOf(track.first())
+        var currentMode = MovementDetector.Mode.UNKNOWN
+        val currentPoints = mutableListOf<TrackPoint>()
+
+        fun flushSegment() {
+            if (currentPoints.size >= 2) {
+                segments += TrackSegment(currentMode, currentPoints.toList())
+            }
+            currentPoints.clear()
+        }
+
         for (index in 1 until track.size) {
             val point = track[index]
             val previous = track[index - 1]
+            if (previous.isStop || point.isStop) {
+                flushSegment()
+                if (!point.isStop) {
+                    currentMode = point.displayMode
+                    currentPoints += point
+                }
+                continue
+            }
+            if (currentPoints.isEmpty()) {
+                currentMode = previous.displayMode
+                currentPoints += previous
+            }
             if (point.displayMode == currentMode) {
                 currentPoints += point
             } else {
                 if (currentPoints.size == 1) {
                     currentPoints += point
                 }
-                if (currentPoints.size >= 2) {
-                    segments += TrackSegment(currentMode, currentPoints.toList())
-                }
+                flushSegment()
                 currentMode = point.displayMode
-                currentPoints = mutableListOf(previous, point)
+                currentPoints += previous
+                currentPoints += point
             }
         }
-        if (currentPoints.size >= 2) {
-            segments += TrackSegment(currentMode, currentPoints.toList())
-        }
+        flushSegment()
         return segments
     }
 
     fun computeDirectionArrowMarkers(
         track: List<TrackPoint>,
         params: DirectionArrowParams = DirectionArrowParams()
+    ): List<DirectionArrowMarker> {
+        val markers = mutableListOf<DirectionArrowMarker>()
+        var index = 0
+        while (index < track.size) {
+            while (index < track.size && track[index].isStop) index += 1
+            val start = index
+            while (index < track.size && !track[index].isStop) index += 1
+            if (index - start >= 3) {
+                markers += computeDirectionArrowMarkersForChunk(track.subList(start, index), params)
+            }
+        }
+        return markers
+    }
+
+    fun computeDirectionArrowMarkersOnScreen(
+        track: List<TrackPoint>,
+        projectToScreen: (TrackPoint) -> Pair<Float, Float>,
+        params: ScreenDirectionArrowParams
+    ): List<DirectionArrowMarker> {
+        val markers = mutableListOf<DirectionArrowMarker>()
+        var index = 0
+        while (index < track.size) {
+            while (index < track.size && track[index].isStop) index += 1
+            val start = index
+            while (index < track.size && !track[index].isStop) index += 1
+            if (index - start >= 3) {
+                markers += computeDirectionArrowMarkersForScreenChunk(
+                    track = track.subList(start, index),
+                    projectToScreen = projectToScreen,
+                    params = params
+                )
+            }
+        }
+        return markers
+    }
+
+    private fun computeDirectionArrowMarkersForChunk(
+        track: List<TrackPoint>,
+        params: DirectionArrowParams
     ): List<DirectionArrowMarker> {
         if (track.size < 3) return emptyList()
         val cumulativeDistance = DoubleArray(track.size)
@@ -851,8 +1184,77 @@ object GpsUtil {
         return markers
     }
 
-    fun inferDisplayModes(samples: List<MotionSample>): List<DisplayModeSample> =
-        inferModeStates(samples.sortedBy { it.timestamp }).map { DisplayModeSample(it.timestamp, it.confirmedMode) }
+    private fun computeDirectionArrowMarkersForScreenChunk(
+        track: List<TrackPoint>,
+        projectToScreen: (TrackPoint) -> Pair<Float, Float>,
+        params: ScreenDirectionArrowParams
+    ): List<DirectionArrowMarker> {
+        if (track.size < 3) return emptyList()
+        val screenPoints = track.map(projectToScreen)
+        val cumulativeDistance = FloatArray(track.size)
+        for (index in 1 until track.size) {
+            val (startX, startY) = screenPoints[index - 1]
+            val (endX, endY) = screenPoints[index]
+            cumulativeDistance[index] = cumulativeDistance[index - 1] +
+                hypot(endX - startX, endY - startY)
+        }
+        val totalDistance = cumulativeDistance.last()
+        if (totalDistance < params.startEndSkipPx * 2f) return emptyList()
+
+        val markers = mutableListOf<DirectionArrowMarker>()
+        var lastPlacedDistance = -params.minSpacingPx
+        for (index in 1 until track.lastIndex) {
+            val distanceAlong = cumulativeDistance[index]
+            if (distanceAlong < params.startEndSkipPx) continue
+            if ((totalDistance - distanceAlong) < params.startEndSkipPx) continue
+            if ((distanceAlong - lastPlacedDistance) < params.minSpacingPx) continue
+
+            val localAngles = mutableListOf<Double>()
+            val localStart = max(0, index - params.localBearingWindow)
+            val localEnd = min(track.lastIndex - 1, index + params.localBearingWindow)
+            for (segmentIndex in localStart..localEnd) {
+                val (startX, startY) = screenPoints[segmentIndex]
+                val (endX, endY) = screenPoints[segmentIndex + 1]
+                val segmentDistance = hypot(endX - startX, endY - startY)
+                if (segmentDistance < params.minSegmentPx) continue
+                localAngles += Math.toDegrees(
+                    atan2(
+                        (endY - startY).toDouble(),
+                        (endX - startX).toDouble()
+                    )
+                )
+            }
+            val meanAngle = if (localAngles.isNotEmpty()) {
+                circularMeanDegrees(localAngles)
+            } else {
+                val (startX, startY) = screenPoints[localStart]
+                val (endX, endY) = screenPoints[min(track.lastIndex, index + params.localBearingWindow)]
+                val tangentDistance = hypot(endX - startX, endY - startY)
+                if (tangentDistance < params.minSegmentPx) continue
+                Math.toDegrees(
+                    atan2(
+                        (endY - startY).toDouble(),
+                        (endX - startX).toDouble()
+                    )
+                )
+            }
+
+            markers += DirectionArrowMarker(
+                lat = track[index].lat,
+                lon = track[index].lon,
+                angleDeg = meanAngle.toFloat(),
+                displayMode = track[index].displayMode
+            )
+            lastPlacedDistance = distanceAlong
+        }
+        return markers
+    }
+
+    fun inferDisplayModes(
+        samples: List<MotionSample>,
+        entries: List<LogEntry> = emptyList()
+    ): List<DisplayModeSample> =
+        inferModeStates(samples.sortedBy { it.timestamp }, entries).map { DisplayModeSample(it.timestamp, it.confirmedMode) }
 
     fun modeAt(timestamp: Long, timeline: List<DisplayModeSample>): MovementDetector.Mode {
         if (timeline.isEmpty()) return MovementDetector.Mode.UNKNOWN
@@ -886,6 +1288,10 @@ object GpsUtil {
         val modeMap = modeStates.associateBy({ it.timestamp }, { it.confirmedMode })
         var lastMode = MovementDetector.Mode.UNKNOWN
         var lastConstantRegionKind: ConstantRegionKind? = null
+        var lastConstantRegionStartLat: Double? = null
+        var lastConstantRegionStartLon: Double? = null
+        var lastConstantRegionEndLat: Double? = null
+        var lastConstantRegionEndLon: Double? = null
         var lastConstantRegionStayLat: Double? = null
         var lastConstantRegionStayLon: Double? = null
         var modeIndex = 0
@@ -897,6 +1303,10 @@ object GpsUtil {
             while (modeIndex < sortedStates.size && sortedStates[modeIndex].timestamp <= entry.timestamp) {
                 lastMode = sortedStates[modeIndex].confirmedMode
                 lastConstantRegionKind = sortedStates[modeIndex].constantRegionKind
+                lastConstantRegionStartLat = sortedStates[modeIndex].constantRegionStartLat
+                lastConstantRegionStartLon = sortedStates[modeIndex].constantRegionStartLon
+                lastConstantRegionEndLat = sortedStates[modeIndex].constantRegionEndLat
+                lastConstantRegionEndLon = sortedStates[modeIndex].constantRegionEndLon
                 lastConstantRegionStayLat = sortedStates[modeIndex].constantRegionStayLat
                 lastConstantRegionStayLon = sortedStates[modeIndex].constantRegionStayLon
                 modeIndex += 1
@@ -909,6 +1319,10 @@ object GpsUtil {
                 stepsDelta = entry.stepsDelta ?: 0,
                 displayMode = modeMap[entry.timestamp] ?: lastMode,
                 constantRegionKind = lastConstantRegionKind,
+                constantRegionStartLat = lastConstantRegionStartLat,
+                constantRegionStartLon = lastConstantRegionStartLon,
+                constantRegionEndLat = lastConstantRegionEndLat,
+                constantRegionEndLon = lastConstantRegionEndLon,
                 constantRegionStayLat = lastConstantRegionStayLat,
                 constantRegionStayLon = lastConstantRegionStayLon
             )
@@ -916,8 +1330,72 @@ object GpsUtil {
         return points
     }
 
-    private fun inferModeStates(samples: List<MotionSample>): List<ModeState> {
+    private fun inferModeStates(
+        samples: List<MotionSample>,
+        entries: List<LogEntry> = emptyList()
+    ): List<ModeState> {
         if (samples.isEmpty()) return emptyList()
+        val usesMotionStateColumns = samples.any {
+            it.confirmedMode != null ||
+                it.kStatus != null ||
+                it.wStatus != null ||
+                it.constantRegionKind != null
+        }
+        if (usesMotionStateColumns) return inferModeStatesFromConfirmedCache(samples, entries)
+
+        return inferLegacyModeStates(samples)
+    }
+
+    private fun inferModeStatesFromConfirmedCache(
+        samples: List<MotionSample>,
+        entries: List<LogEntry>
+    ): List<ModeState> {
+        val result = mutableListOf<ModeState>()
+        val lastConfirmedIndex = samples.indexOfLast { parseConfirmedMode(it.confirmedMode) != null }
+        val locatedEntries = entries
+            .asSequence()
+            .filter { it.hasLocation }
+            .distinctBy { it.timestamp }
+            .sortedBy { it.timestamp }
+            .toList()
+
+        samples.forEachIndexed { index, sample ->
+            val constantRegionKind = parseConstantRegionKind(sample.constantRegionKind)
+            parseConfirmedMode(sample.confirmedMode)?.let { confirmedMode ->
+                result += modeStateFromSample(
+                    sample = sample,
+                    mode = displayModeFromConfirmedSample(
+                        sample = sample,
+                        confirmedMode = confirmedMode,
+                        constantRegionKind = constantRegionKind,
+                        locatedEntries = locatedEntries
+                    ),
+                    constantRegionKind = constantRegionKind
+                )
+                return@forEachIndexed
+            }
+
+            // 確定ポイント以降だけ、現在まで続く未確定区間として暫定表示する。
+            if (index > lastConfirmedIndex) {
+                provisionalModeFromNewState(
+                    sample = sample,
+                    locatedEntries = locatedEntries,
+                    constantRegionKind = constantRegionKind,
+                    allowOpenRegionFallback = true
+                )?.let { provisionalMode ->
+                    result += modeStateFromSample(
+                        sample = sample,
+                        mode = provisionalMode,
+                        constantRegionKind = constantRegionKind
+                    )
+                }
+            }
+        }
+
+        return result
+    }
+
+    private fun inferLegacyModeStates(samples: List<MotionSample>): List<ModeState> {
         val history = ArrayDeque<Int>()
         var currentMode = MovementDetector.Mode.UNKNOWN
         var pendingMode = MovementDetector.Mode.UNKNOWN
@@ -925,20 +1403,7 @@ object GpsUtil {
         val result = mutableListOf<ModeState>()
 
         samples.forEach { sample ->
-            parseConfirmedMode(sample.confirmedMode)?.let { confirmedMode ->
-                currentMode = confirmedMode
-                pendingMode = MovementDetector.Mode.UNKNOWN
-                pendingCount = 0
-                result += ModeState(
-                    timestamp = sample.timestamp,
-                    confirmedMode = currentMode,
-                    constantRegionKind = parseConstantRegionKind(sample.constantRegionKind),
-                    constantRegionStayLat = sample.constantRegionStayLat,
-                    constantRegionStayLon = sample.constantRegionStayLon
-                )
-                return@forEach
-            }
-
+            val constantRegionKind = parseConstantRegionKind(sample.constantRegionKind)
             val stepDelta3s = sample.stepDelta3s?.coerceAtLeast(0)
             history.addLast(stepDelta3s ?: 0)
             while (history.size > MODE_STEP_SMOOTH_WINDOW_COUNT) history.removeFirst()
@@ -986,17 +1451,130 @@ object GpsUtil {
                 }
             }
 
-            result += ModeState(
-                timestamp = sample.timestamp,
-                confirmedMode = currentMode,
-                constantRegionKind = parseConstantRegionKind(sample.constantRegionKind),
-                constantRegionStayLat = sample.constantRegionStayLat,
-                constantRegionStayLon = sample.constantRegionStayLon
+            result += modeStateFromSample(
+                sample = sample,
+                mode = currentMode,
+                constantRegionKind = constantRegionKind
             )
         }
 
         return result
     }
+
+    private fun displayModeFromConfirmedSample(
+        sample: MotionSample,
+        confirmedMode: MovementDetector.Mode,
+        constantRegionKind: ConstantRegionKind?,
+        locatedEntries: List<LogEntry>
+    ): MovementDetector.Mode {
+        if (confirmedMode != MovementDetector.Mode.WALKING) return confirmedMode
+        return resolveDisplayWalkingMode(sample, constantRegionKind, locatedEntries)
+    }
+
+    private fun resolveDisplayWalkingMode(
+        sample: MotionSample,
+        constantRegionKind: ConstantRegionKind?,
+        locatedEntries: List<LogEntry>
+    ): MovementDetector.Mode {
+        val gpsSpeed = gpsSpeedKmhAt(sample.timestamp, locatedEntries, DISPLAY_MOTION_PARAMS.walkingSpeedWindowMs)
+            ?: sample.constantRegionSpeedKmh.takeIf {
+                constantRegionKind == ConstantRegionKind.CONSTANT_MOVE && it != null && it.isFinite()
+            }
+        val stepSpeed = displayStepSpeedKmh(sample)
+        val walkingSpeed = WalkingSpeedSnapshot(
+            gpsSpeedKmh = gpsSpeed,
+            stepSpeedKmh = stepSpeed,
+            differenceKmh = if (gpsSpeed != null && stepSpeed != null) abs(gpsSpeed - stepSpeed) else null
+        )
+        return FinalContextResolver.resolveWalkingMode(walkingSpeed, DISPLAY_MOTION_PARAMS)
+    }
+
+    private fun displayStepSpeedKmh(sample: MotionSample): Double? {
+        val steps = sample.stepDeltaWindow?.coerceAtLeast(0) ?: return null
+        val windowSec = DISPLAY_MOTION_PARAMS.walkingSpeedWindowMs / 1000.0
+        if (windowSec <= 0.0) return null
+        return steps * DISPLAY_MOTION_PARAMS.walkingStepLengthM / windowSec * 3.6
+    }
+
+    private fun gpsSpeedKmhAt(
+        timestamp: Long,
+        locatedEntries: List<LogEntry>,
+        windowMs: Long
+    ): Double? {
+        if (locatedEntries.size < 2 || windowMs <= 0L) return null
+        val startIndex = lowerBoundLocatedEntry(locatedEntries, timestamp - windowMs)
+        val endExclusive = upperBoundLocatedEntry(locatedEntries, timestamp)
+        if (endExclusive - startIndex < 2) return null
+
+        val first = locatedEntries[startIndex]
+        val last = locatedEntries[endExclusive - 1]
+        val lat1 = first.latitude ?: return null
+        val lon1 = first.longitude ?: return null
+        val lat2 = last.latitude ?: return null
+        val lon2 = last.longitude ?: return null
+        val dtMs = last.timestamp - first.timestamp
+        if (dtMs <= 0L) return null
+        return haversineM(lat1, lon1, lat2, lon2) / (dtMs / 1000.0) * 3.6
+    }
+
+    private fun lowerBoundLocatedEntry(entries: List<LogEntry>, timestamp: Long): Int {
+        var low = 0
+        var high = entries.size
+        while (low < high) {
+            val mid = (low + high) ushr 1
+            if (entries[mid].timestamp < timestamp) low = mid + 1 else high = mid
+        }
+        return low
+    }
+
+    private fun upperBoundLocatedEntry(entries: List<LogEntry>, timestamp: Long): Int {
+        var low = 0
+        var high = entries.size
+        while (low < high) {
+            val mid = (low + high) ushr 1
+            if (entries[mid].timestamp <= timestamp) low = mid + 1 else high = mid
+        }
+        return low
+    }
+
+    private fun provisionalModeFromNewState(
+        sample: MotionSample,
+        locatedEntries: List<LogEntry>,
+        constantRegionKind: ConstantRegionKind?,
+        allowOpenRegionFallback: Boolean
+    ): MovementDetector.Mode? {
+        val stK = StKStatus.fromStored(sample.kStatus)
+        val wStatus = sample.wStatus
+        return when {
+            stK == StKStatus.STK4 -> MovementDetector.Mode.VEHICLE
+            wStatus == "W1" -> resolveDisplayWalkingMode(sample, constantRegionKind, locatedEntries)
+            constantRegionKind == ConstantRegionKind.CONSTANT_MOVE -> MovementDetector.Mode.VEHICLE
+            constantRegionKind == ConstantRegionKind.STAY && stK == StKStatus.STK1 -> MovementDetector.Mode.DEVICE_STILL
+            constantRegionKind == ConstantRegionKind.STAY -> MovementDetector.Mode.STOPPED
+            allowOpenRegionFallback && stK != null && wStatus == "W2" -> {
+                // 現在まで続く未確定区間だけの暫定表示。閉じた区間はバックフィル済みになる。
+                if (stK == StKStatus.STK1) MovementDetector.Mode.DEVICE_STILL else MovementDetector.Mode.STOPPED
+            }
+            else -> null
+        }
+    }
+
+    private fun modeStateFromSample(
+        sample: MotionSample,
+        mode: MovementDetector.Mode,
+        constantRegionKind: ConstantRegionKind?
+    ): ModeState =
+        ModeState(
+            timestamp = sample.timestamp,
+            confirmedMode = mode,
+            constantRegionKind = constantRegionKind,
+            constantRegionStartLat = sample.constantRegionStartLat,
+            constantRegionStartLon = sample.constantRegionStartLon,
+            constantRegionEndLat = sample.constantRegionEndLat,
+            constantRegionEndLon = sample.constantRegionEndLon,
+            constantRegionStayLat = sample.constantRegionStayLat,
+            constantRegionStayLon = sample.constantRegionStayLon
+        )
 
     private fun parseConfirmedMode(value: String?): MovementDetector.Mode? =
         value?.let {
@@ -1008,13 +1586,14 @@ object GpsUtil {
             runCatching { ConstantRegionKind.valueOf(it) }.getOrNull()
         }?.takeUnless { it == ConstantRegionKind.NONE }
 
-    private fun collapseStayRegions(points: List<DisplayPoint>): List<DisplayPoint> {
+    private fun collapseConstantRegions(points: List<DisplayPoint>): List<DisplayPoint> {
         if (points.isEmpty()) return emptyList()
         val collapsed = mutableListOf<DisplayPoint>()
         var index = 0
         while (index < points.size) {
             val point = points[index]
-            if (point.constantRegionKind != ConstantRegionKind.STAY) {
+            val kind = point.constantRegionKind
+            if (kind == null || kind == ConstantRegionKind.NONE) {
                 collapsed += point
                 index += 1
                 continue
@@ -1023,19 +1602,26 @@ object GpsUtil {
             var endExclusive = index + 1
             while (
                 endExclusive < points.size &&
-                points[endExclusive].constantRegionKind == ConstantRegionKind.STAY
+                points[endExclusive].constantRegionKind == kind
             ) {
                 endExclusive += 1
             }
 
             val segment = points.subList(index, endExclusive)
-            val keepPoint = segment.last()
-            val stayLat = keepPoint.constantRegionStayLat ?: segment.map { it.lat }.average()
-            val stayLon = keepPoint.constantRegionStayLon ?: segment.map { it.lon }.average()
-            collapsed += keepPoint.copy(
-                lat = stayLat,
-                lon = stayLon
-            )
+            when (kind) {
+                ConstantRegionKind.STAY -> {
+                    val keepPoint = segment.last()
+                    val stayLat = keepPoint.constantRegionStayLat ?: segment.map { it.lat }.average()
+                    val stayLon = keepPoint.constantRegionStayLon ?: segment.map { it.lon }.average()
+                    collapsed += keepPoint.copy(lat = stayLat, lon = stayLon)
+                }
+                ConstantRegionKind.CONSTANT_MOVE -> {
+                    collapsed.addAll(segment)
+                }
+                else -> {
+                    collapsed.addAll(segment)
+                }
+            }
             index = endExclusive
         }
         return collapsed
@@ -1361,5 +1947,157 @@ object GpsUtil {
         }
         return dist
     }
-}
 
+    // ── 状態ラベル（地図上に stK / W / 定速領域 を表示するためのマーカーデータ） ──
+
+    const val STATE_LABEL_COLOR_STK1  = 0xFF555566.toInt()  // 暗グレー（静止）
+    const val STATE_LABEL_COLOR_STK2  = 0xFFBB6600.toInt()  // アンバー（振動）
+    const val STATE_LABEL_COLOR_STK4  = 0xFFCC2200.toInt()  // 赤橙（加速）
+    const val STATE_LABEL_COLOR_W1    = 0xFF1E66E8.toInt()  // 青（歩行中）
+    const val STATE_LABEL_COLOR_W2    = 0xFF7799BB.toInt()  // グレー青（歩行なし）
+    const val STATE_LABEL_COLOR_STAY  = 0xFF1E9944.toInt()  // 緑（滞在）
+    const val STATE_LABEL_COLOR_CMOVE = 0xFF8822CC.toInt()  // 紫（定速移動）
+    const val STATE_LABEL_COLOR_TRK_ON  = 0xFFD84315.toInt() // 赤橙（GPS即時トリガーON）
+    const val STATE_LABEL_COLOR_TRK_OFF = 0xFF607D8B.toInt() // 青灰（GPS即時トリガーOFF）
+
+    /**
+     * 地図上に重ねて表示する状態ラベルの1件。
+     * @param text  ラベル文字列（"K1"/"K2"/"K4"/"W1"/"W2"/"STAY"/"CMOV"）
+     * @param bgColor バッジ背景色（STATE_LABEL_COLOR_* 定数）
+     */
+    data class StateLabel(
+        val lat: Double,
+        val lon: Double,
+        val text: String,
+        val bgColor: Int
+    )
+
+    /**
+     * MotionSample の stK / wStatus / constantRegionKind の遷移点を GPS 座標と紐付け、
+     * 状態ラベルの一覧を返す。
+     *
+     * 同じ状態が続く間はラベルを出さず、変化したときだけ1件追加する。
+     * これにより 3 秒ごとに大量のラベルが出ることを防ぐ。
+     */
+    fun buildStateLabels(entries: List<LogEntry>, motionSamples: List<MotionSample>): List<StateLabel> {
+        if (entries.isEmpty() || motionSamples.isEmpty()) return emptyList()
+        val locatedEntries = entries.filter { it.hasLocation }.sortedBy { it.timestamp }
+        if (locatedEntries.isEmpty()) return emptyList()
+
+        val sorted = motionSamples.sortedBy { it.timestamp }
+        val labels = mutableListOf<StateLabel>()
+        var prevStK: StKStatus? = null
+        var prevW: String? = null
+        var prevRegion: ConstantRegionKind? = null
+
+        for (sample in sorted) {
+            val stK = StKStatus.fromStored(sample.kStatus)
+            val w = sample.wStatus
+            val region = parseConstantRegionKind(sample.constantRegionKind)
+
+            val stKChanged = stK != null && stK != prevStK
+            val wChanged = w != null && w != prevW
+            val regionChanged = region != prevRegion
+
+            if (stKChanged || wChanged || regionChanged) {
+                val nearest = nearestLocatedEntry(locatedEntries, sample.timestamp)
+                val lat = nearest?.latitude
+                val lon = nearest?.longitude
+                if (lat != null && lon != null) {
+                    if (stKChanged) {
+                        val text = when (stK) {
+                            StKStatus.STK1 -> "K1"
+                            StKStatus.STK2 -> "K2"
+                            StKStatus.STK4 -> "K4"
+                        }
+                        labels += StateLabel(lat, lon, text, stKLabelColor(stK))
+                    }
+                    if (wChanged) {
+                        labels += StateLabel(lat, lon, w, wLabelColor(w))
+                    }
+                    if (regionChanged) {
+                        when (region) {
+                            ConstantRegionKind.STAY          -> labels += StateLabel(lat, lon, "STAY", STATE_LABEL_COLOR_STAY)
+                            ConstantRegionKind.CONSTANT_MOVE -> labels += StateLabel(lat, lon, "CMOV", STATE_LABEL_COLOR_CMOVE)
+                            else -> {}
+                        }
+                    }
+                }
+            }
+
+            if (stK != null) prevStK = stK
+            if (w != null) prevW = w
+            prevRegion = region
+        }
+        return labels
+    }
+
+    /**
+     * MotionSample の trK 遷移点を GPS 座標と紐付け、トリガーラベル一覧を返す。
+     *
+     * trK は GPS 即時取得 / 短周期復帰の制御用トリガーなので、ON/OFF の変化点だけを表示する。
+     */
+    fun buildTrkLabels(entries: List<LogEntry>, motionSamples: List<MotionSample>): List<StateLabel> {
+        if (entries.isEmpty() || motionSamples.isEmpty()) return emptyList()
+        val locatedEntries = entries.filter { it.hasLocation }.sortedBy { it.timestamp }
+        if (locatedEntries.isEmpty()) return emptyList()
+
+        val sorted = motionSamples.sortedBy { it.timestamp }
+        val labels = mutableListOf<StateLabel>()
+        var prevTrK: TrKStatus? = null
+
+        for (sample in sorted) {
+            val trK = parseTrKStatus(sample.trKStatus)
+            if (trK != null && trK != prevTrK) {
+                val nearest = nearestLocatedEntry(locatedEntries, sample.timestamp)
+                val lat = nearest?.latitude
+                val lon = nearest?.longitude
+                if (lat != null && lon != null) {
+                    labels += StateLabel(
+                        lat = lat,
+                        lon = lon,
+                        text = if (trK == TrKStatus.ON) "tON" else "tOFF",
+                        bgColor = if (trK == TrKStatus.ON) STATE_LABEL_COLOR_TRK_ON else STATE_LABEL_COLOR_TRK_OFF
+                    )
+                }
+            }
+            if (trK != null) prevTrK = trK
+        }
+        return labels
+    }
+
+    /**
+     * ソート済みの位置付きエントリ一覧から、timestamp に最も近いエントリを二分探索で返す。
+     */
+    private fun nearestLocatedEntry(locatedEntries: List<LogEntry>, timestamp: Long): LogEntry? {
+        if (locatedEntries.isEmpty()) return null
+        var idx = locatedEntries.binarySearch { it.timestamp.compareTo(timestamp) }
+        if (idx < 0) idx = -(idx + 1)
+        return when {
+            idx >= locatedEntries.size -> locatedEntries.last()
+            idx == 0                  -> locatedEntries.first()
+            else -> {
+                val before = locatedEntries[idx - 1]
+                val after  = locatedEntries[idx]
+                if (timestamp - before.timestamp <= after.timestamp - timestamp) before else after
+            }
+        }
+    }
+
+    private fun stKLabelColor(stK: StKStatus): Int = when (stK) {
+        StKStatus.STK1 -> STATE_LABEL_COLOR_STK1
+        StKStatus.STK2 -> STATE_LABEL_COLOR_STK2
+        StKStatus.STK4 -> STATE_LABEL_COLOR_STK4
+    }
+
+    private fun wLabelColor(w: String): Int = when (w) {
+        "W1" -> STATE_LABEL_COLOR_W1
+        else -> STATE_LABEL_COLOR_W2
+    }
+
+    private fun parseTrKStatus(value: String?): TrKStatus? = when (value) {
+        "ON" -> TrKStatus.ON
+        "OFF" -> TrKStatus.OFF
+        else -> null
+    }
+}

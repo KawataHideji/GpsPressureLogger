@@ -6,7 +6,6 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
-import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -28,10 +27,6 @@ class SettingsRepository(private val context: Context) {
         val KEY_PRESSURE_WIDGET_INTERVAL_MIN = intPreferencesKey("pressure_widget_interval_min")
         /** 地図ウィジェット更新間隔（秒） */
         val KEY_MAP_WIDGET_INTERVAL_MIN = intPreferencesKey("map_widget_interval_min")
-        /** 気圧・標高ウィジェットの最終描画時刻 */
-        val KEY_PRESSURE_WIDGET_LAST_RENDER_MS = longPreferencesKey("pressure_widget_last_render_ms")
-        /** 地図ウィジェットの最終描画時刻 */
-        val KEY_MAP_WIDGET_LAST_RENDER_MS = longPreferencesKey("map_widget_last_render_ms")
         /** ウィジェットの背景透明度 (0-255) */
         val KEY_WIDGET_TRANSPARENCY = intPreferencesKey("widget_transparency")
         /** GPS不在時のセンサー強制記録間隔（秒） */
@@ -78,12 +73,6 @@ class SettingsRepository(private val context: Context) {
                 .coerceIn(MIN_WIDGET_INTERVAL_SEC, MAX_WIDGET_INTERVAL_SEC)
         }
 
-    val pressureWidgetLastRenderMs: Flow<Long> = context.dataStore.data
-        .map { it[KEY_PRESSURE_WIDGET_LAST_RENDER_MS] ?: 0L }
-
-    val mapWidgetLastRenderMs: Flow<Long> = context.dataStore.data
-        .map { it[KEY_MAP_WIDGET_LAST_RENDER_MS] ?: 0L }
-
     val widgetTransparency: Flow<Int> = context.dataStore.data
         .map { it[KEY_WIDGET_TRANSPARENCY] ?: DEFAULT_WIDGET_TRANSPARENCY }
 
@@ -126,14 +115,6 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit {
             it[KEY_MAP_WIDGET_INTERVAL_MIN] = value.coerceIn(MIN_WIDGET_INTERVAL_SEC, MAX_WIDGET_INTERVAL_SEC)
         }
-    }
-
-    suspend fun setPressureWidgetLastRenderMs(value: Long) {
-        context.dataStore.edit { it[KEY_PRESSURE_WIDGET_LAST_RENDER_MS] = value }
-    }
-
-    suspend fun setMapWidgetLastRenderMs(value: Long) {
-        context.dataStore.edit { it[KEY_MAP_WIDGET_LAST_RENDER_MS] = value }
     }
 
     suspend fun setWidgetTransparency(value: Int) {

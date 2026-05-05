@@ -33,9 +33,25 @@ interface LogDao {
     @Query("SELECT * FROM log_entries WHERE timestamp >= :since ORDER BY timestamp DESC")
     fun getEntriesSince(since: Long): Flow<List<LogEntry>>
 
+    /** 指定タイムスタンプ以降の全レコードを一度だけ取得（新しい順） */
+    @Query("SELECT * FROM log_entries WHERE timestamp >= :since ORDER BY timestamp DESC")
+    suspend fun getEntriesSinceOnce(since: Long): List<LogEntry>
+
+    /** 指定タイムスタンプ以降の全レコードをFlowで取得（古い順） */
+    @Query("SELECT * FROM log_entries WHERE timestamp >= :since ORDER BY timestamp ASC")
+    fun getEntriesSinceAsc(since: Long): Flow<List<LogEntry>>
+
     /** 指定期間のレコードを Flow で取得（新しい順） */
     @Query("SELECT * FROM log_entries WHERE timestamp >= :fromTs AND timestamp <= :toTs ORDER BY timestamp DESC")
     fun getEntriesBetween(fromTs: Long, toTs: Long): Flow<List<LogEntry>>
+
+    /** 指定期間のレコードを Flow で取得（古い順） */
+    @Query("SELECT * FROM log_entries WHERE timestamp >= :fromTs AND timestamp <= :toTs ORDER BY timestamp ASC")
+    fun getEntriesBetweenAsc(fromTs: Long, toTs: Long): Flow<List<LogEntry>>
+
+    /** 指定期間のレコードを一度だけ取得（古い順） */
+    @Query("SELECT * FROM log_entries WHERE timestamp >= :fromTs AND timestamp < :toExclusiveTs ORDER BY timestamp ASC")
+    suspend fun getEntriesBetweenAscOnce(fromTs: Long, toExclusiveTs: Long): List<LogEntry>
 
     /** 最新1件 */
     @Query("SELECT * FROM log_entries ORDER BY timestamp DESC LIMIT 1")

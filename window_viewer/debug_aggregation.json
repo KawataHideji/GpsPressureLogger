@@ -1,0 +1,318 @@
+{
+  "summary": {
+    "total_rows": 432617,
+    "has_motion_samples": false,
+    "motion_sample_count": 0
+  },
+  "rows_sample": [
+    {
+      "idx": 0,
+      "ts": "2016-11-03 00:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 1,
+      "ts": "2016-11-03 01:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 2,
+      "ts": "2016-11-03 02:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 3,
+      "ts": "2016-11-03 03:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 4,
+      "ts": "2016-11-03 04:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 5,
+      "ts": "2016-11-03 05:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 6,
+      "ts": "2016-11-03 06:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 7,
+      "ts": "2016-11-03 07:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 8,
+      "ts": "2016-11-03 08:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 9,
+      "ts": "2016-11-03 09:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 10,
+      "ts": "2016-11-03 10:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 11,
+      "ts": "2016-11-03 11:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 12,
+      "ts": "2016-11-03 12:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 13,
+      "ts": "2016-11-03 13:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 14,
+      "ts": "2016-11-03 14:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 15,
+      "ts": "2016-11-03 15:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 16,
+      "ts": "2016-11-03 16:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 17,
+      "ts": "2016-11-03 17:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 18,
+      "ts": "2016-11-03 18:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 19,
+      "ts": "2016-11-03 19:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 20,
+      "ts": "2016-11-03 20:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 21,
+      "ts": "2016-11-03 21:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 22,
+      "ts": "2016-11-03 22:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 23,
+      "ts": "2016-11-03 23:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 24,
+      "ts": "2016-11-04 00:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 25,
+      "ts": "2016-11-04 01:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 26,
+      "ts": "2016-11-04 02:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 27,
+      "ts": "2016-11-04 03:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 28,
+      "ts": "2016-11-04 04:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 29,
+      "ts": "2016-11-04 05:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 30,
+      "ts": "2016-11-04 06:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 31,
+      "ts": "2016-11-04 07:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 32,
+      "ts": "2016-11-04 08:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 33,
+      "ts": "2016-11-04 09:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 34,
+      "ts": "2016-11-04 10:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 35,
+      "ts": "2016-11-04 11:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 36,
+      "ts": "2016-11-04 12:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 37,
+      "ts": "2016-11-04 13:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 38,
+      "ts": "2016-11-04 14:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 39,
+      "ts": "2016-11-04 15:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 40,
+      "ts": "2016-11-04 16:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 41,
+      "ts": "2016-11-04 17:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 42,
+      "ts": "2016-11-04 18:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 43,
+      "ts": "2016-11-04 19:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 44,
+      "ts": "2016-11-04 20:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 45,
+      "ts": "2016-11-04 21:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 46,
+      "ts": "2016-11-04 22:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 47,
+      "ts": "2016-11-04 23:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 48,
+      "ts": "2016-11-05 00:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    },
+    {
+      "idx": 49,
+      "ts": "2016-11-05 01:30:00",
+      "mode": "UNKNOWN",
+      "kind": "NONE"
+    }
+  ],
+  "transitions": [
+    {
+      "idx": 0,
+      "ts": "2016-11-03 00:30:00",
+      "from": null,
+      "to": "UNKNOWN",
+      "kind": "NONE"
+    }
+  ]
+}
