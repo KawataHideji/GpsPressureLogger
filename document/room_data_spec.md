@@ -36,7 +36,7 @@ Room は表示都合の派生値ではなく、できるだけ元の意味に近
 
 ## 3. テーブル方針
 
-現時点では、主記録と補助センサー判定ログを分けた 2 テーブル構成を基本とする。
+現時点では、主記録と状態イベントログを分けた 2 テーブル構成を基本とする。`motion_samples` という既存テーブル名は維持するが、新規記録では 3 秒ごとの全サンプルではなく状態変化点を中心に保存する。
 
 想定テーブル名:
 
@@ -138,6 +138,7 @@ Room は表示都合の派生値ではなく、できるだけ元の意味に近
 - `motion_samples.kAvg: Float?`
   - nullable
   - `stK` 判定用に、前回 base_cycle から今回 base_cycle までの 3 軸線形加速度を可能なら世界座標へ変換したうえで軸ごとに平均し、その平均ベクトルのノルムを取った値
+  - 外部 CSV では `StKAvg` として出力する。旧 CSV の `KAvg` は import 互換として受け入れる
 
 - `motion_samples.kScalarAvg: Float?`
   - nullable
@@ -146,6 +147,7 @@ Room は表示都合の派生値ではなく、できるだけ元の意味に近
 - `motion_samples.kDirectionalityRatio: Float?`
   - nullable
   - `kAvg / kScalarAvg`
+  - 外部 CSV では `StKRatio` として出力する。旧 CSV の `KDirectionalityRatio` は import 互換として受け入れる
 
 - `motion_samples.kVariance: Float?`
   - nullable
@@ -183,6 +185,7 @@ Room は表示都合の派生値ではなく、できるだけ元の意味に近
 - `motion_samples.trKDirectionalityRatio: Float?`
   - nullable
   - `trKAvg / trKScalarAvg`
+  - 外部 CSV では `TrKRatio` として出力する。算出不能時は null を保存する。旧 CSV の `TrKDirectionalityRatio` は import 互換として受け入れる
 
 - `motion_samples.trKMaxMagnitude: Float?`
   - nullable
@@ -397,6 +400,7 @@ CSV の空欄は Room では `null` として扱う。
 - Room version 7 から 8 への移行で、新方式の stK/w-status、GPS 判定、確定モード列を追加する。Room / CSV の列名は互換のため `kStatus` 系を維持する
 - Room version 10 で `motion_samples.kAccelSource` を追加し、3 秒スロットごとの加速度座標変換 source を保存する
 - Room version 11 で `motion_samples.kScalarAvg / kDirectionalityRatio / kMaxMagnitude / trK*` を追加し、3 秒 `stK` 指標と 1 秒 `trK` 指標の実測値を後から解析できるようにした
+- 2026-05 以降の新規記録では `motion_samples` を状態イベントログとして使い、`KStatus / TrKStatus / WStatus / confirmedMode / constantRegionKind` の変化点を中心に保存する。表示側は前方補完で状態を復元する。旧 3 秒サンプル形式は import / viewer 互換として維持する
 - destructive migration は使用しない
 
 移行方針:

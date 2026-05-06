@@ -66,11 +66,12 @@ export は次の用途に使う。
 - 並び順は昇順
 - `Timestamp` は一意
 - 欠損は空欄
-- 補助センサー判定ログを出力する場合は、主記録とは別ファイルに分ける
-- 設定画面からは主記録バックアップと補助センサー判定ログバックアップを個別に出力できる
+- 状態イベントログを出力する場合は、主記録とは別ファイルに分ける
+- 設定画面からは主記録バックアップと状態イベントログバックアップを個別に出力できる
 - export は `ACTION_CREATE_DOCUMENT` で作成した文書 URI へ直接書き込む
 - export 成功判定は「書き込み例外なし」だけでなく、「close 後に文書サイズが 0 byte より大きいこと」も必須とする
 - `openOutputStream()==null`、書き込み例外、close 後 0 byte 文書のいずれかは失敗扱いとし、可能ならその場で空ファイルを削除する
+- 状態イベントログの手動 export は、過去の `motion_samples` が多数残っていてもメモリを圧迫しないよう、Room から昇順ページ単位で読み出して CSV へ逐次書き込む
 
 ### 3.3 データ源
 
@@ -96,7 +97,8 @@ export は次の用途に使う。
 
 補助センサー判定ログ import を行う場合:
 
-- ファイル名は `gps_pressure_motion_metrics*.csv` または `motion_metrics_*.csv` とする
+- 新形式のファイル名は `gps_pressure_motion_events*.csv` または `motion_events_*.csv` とする
+- 旧形式の `gps_pressure_motion_metrics*.csv` または `motion_metrics_*.csv` も互換 import 対象とする
 - ヘッダは新方式の補助センサー判定ログヘッダに一致させる
 - 旧拡張ヘッダ `...ConstantRegionSpeedKmh` までの形式も互換 import として受け入れる
 - 旧ヘッダ `Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s` も互換 import として受け入れる
@@ -166,8 +168,8 @@ export は次の用途に使う。
 - ファイル単位は 03:00 区切り日で分ける
 - ファイル名は `gps_log_yyyyMMdd.csv` とする
 - 重要イベントは `# EVENT <timestamp> <message>` 形式で同じ日次 CSV に追記する
-- 補助センサー判定ログは別系列の日常ログとして `motion_metrics_yyyyMMdd.csv` を用いる
-- 日次 CSV と補助ログ CSV への書き出しは、メモリキュー 100 件到達時または強制フラッシュ時にまとめて行う
+- 状態イベントログは別系列の日常ログとして `motion_events_yyyyMMdd.csv` を用いる
+- 日次 CSV と状態イベントログ CSV への書き出しは、メモリキュー 100 件到達時または強制フラッシュ時にまとめて行う
 - 手動 export 開始時は、バックアップ CSV 生成前に未書込キューを日次 CSV 側へ flush する
 - 手動 export 成功時は `EXPORT_STANDARD_OK` / `EXPORT_MOTION_OK`、失敗時は `EXPORT_STANDARD_FAILED` / `EXPORT_MOTION_FAILED` を debug log へ残す
 
@@ -193,8 +195,9 @@ export は次の用途に使う。
 
 - `logs/log_YYYYMMDD.csv`
 - `exports/export_YYYYMMDD_HHMMSS.csv`
-- `metrics/motion_metrics_YYYYMMDD.csv`
-- `exports/gps_pressure_motion_metrics_backup_YYYYMMDD_HHMMSS.csv`
+- `metrics/motion_events_YYYYMMDD.csv`
+- `exports/gps_pressure_motion_events_backup_YYYYMMDD_HHMMSS.csv`
+- 旧 `metrics/motion_metrics_YYYYMMDD.csv` / `exports/gps_pressure_motion_metrics_backup_*.csv` は互換入力として読む
 - `debug/debug_log_YYYYMMDD.txt`
 
 現行実装:

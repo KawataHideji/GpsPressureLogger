@@ -15,6 +15,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.graphics.Canvas
+import android.graphics.DashPathEffect
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.content.res.Resources
 import com.example.gpspressurelogger.ui.viewmodel.MapViewModel
 import com.example.gpspressurelogger.util.GpsUtil
@@ -42,6 +46,7 @@ fun MapScreen(
     val dateFormatter = remember { SimpleDateFormat("yyyy年M月d日", Locale.JAPAN) }
     var lastAutoFitTarget by remember { mutableLongStateOf(Long.MIN_VALUE) }
     var lastEmptyResetTarget by remember { mutableLongStateOf(Long.MIN_VALUE) }
+    var lastRenderSignature by remember { mutableStateOf<MapRenderSignature?>(null) }
     var showStateLabels by remember { mutableStateOf(false) }
     var showTrkLabels by remember { mutableStateOf(false) }
 
@@ -127,21 +132,32 @@ fun MapScreen(
                 }
             },
             update = { mapView ->
-                mapView.overlays.clear()
                 val entriesReadyForTarget = entriesMatchTargetDay(entries, targetDateStart)
 
                 if (!entriesReadyForTarget && lastEmptyResetTarget != targetDateStart) {
                     // 日付切り替え直後など、対象日のデータがまだ届いていない間は初期表示へ戻す。
                     // ここでは auto-fit 完了扱いにしない。あとから対象日の entries が届いたら 1 回だけ fit する。
                     mapView.post {
+                        mapView.overlays.clear()
                         mapView.controller.setZoom(12.0)
                         mapView.controller.setCenter(GeoPoint(35.6812, 139.7671))
+                        lastRenderSignature = null
                     }
                     lastEmptyResetTarget = targetDateStart
                 }
 
                 if (entriesReadyForTarget) {
                     val displayEntries = entries
+                    val renderSignature = MapRenderSignature.from(
+                        targetDateStart = targetDateStart,
+                        entries = displayEntries,
+                        motionSamples = motionSamples,
+                        showStateLabels = showStateLabels,
+                        showTrkLabels = showTrkLabels
+                    )
+                    if (lastRenderSignature == renderSignature && lastAutoFitTarget == targetDateStart) {
+                        return@AndroidView
+                    }
 
                     if (lastAutoFitTarget != targetDateStart) {
                         lastAutoFitTarget = targetDateStart
@@ -164,16 +180,58 @@ fun MapScreen(
                                     capturedShowLabels,
                                     capturedShowTrkLabels
                                 )
+                                lastRenderSignature = renderSignature.copy(
+                                    showStateLabels = capturedShowLabels,
+                                    showTrkLabels = capturedShowTrkLabels
+                                )
                                 mapView.invalidate()
                             }
-                        } ?: renderMapOverlays(mapView, displayEntries, motionSamples, showStateLabels, showTrkLabels)
+                        } ?: run {
+                            mapView.overlays.clear()
+                            renderMapOverlays(mapView, displayEntries, motionSamples, showStateLabels, showTrkLabels)
+                            lastRenderSignature = renderSignature
+                        }
                     } else {
+                        mapView.overlays.clear()
                         renderMapOverlays(mapView, displayEntries, motionSamples, showStateLabels, showTrkLabels)
+                        lastRenderSignature = renderSignature
                     }
                 }
                 mapView.invalidate()
             }
         )
+    }
+}
+
+private data class MapRenderSignature(
+    val targetDateStart: Long,
+    val entryCount: Int,
+    val firstEntryTimestamp: Long,
+    val lastEntryTimestamp: Long,
+    val motionSampleCount: Int,
+    val lastMotionSampleTimestamp: Long,
+    val showStateLabels: Boolean,
+    val showTrkLabels: Boolean
+) {
+    companion object {
+        fun from(
+            targetDateStart: Long,
+            entries: List<LogEntry>,
+            motionSamples: List<MotionSample>,
+            showStateLabels: Boolean,
+            showTrkLabels: Boolean
+        ): MapRenderSignature {
+            return MapRenderSignature(
+                targetDateStart = targetDateStart,
+                entryCount = entries.size,
+                firstEntryTimestamp = entries.firstOrNull()?.timestamp ?: Long.MIN_VALUE,
+                lastEntryTimestamp = entries.lastOrNull()?.timestamp ?: Long.MIN_VALUE,
+                motionSampleCount = motionSamples.size,
+                lastMotionSampleTimestamp = motionSamples.lastOrNull()?.timestamp ?: Long.MIN_VALUE,
+                showStateLabels = showStateLabels,
+                showTrkLabels = showTrkLabels
+            )
+        }
     }
 }
 
@@ -194,6 +252,7 @@ private fun renderMapOverlays(
     val polylineTrack = GpsUtil.buildDisplayPolyline(displayEntries, motionSamples)
     val stopMarkers = GpsUtil.clusterStops(displayEntries)
     val polylineSegments = GpsUtil.splitTrackByMode(polylineTrack)
+    val gpsGapSegments = GpsUtil.buildGpsGapBreakSegments(polylineTrack)
     val density = mapView.context.resources.displayMetrics.density
     val directionMarkers = GpsUtil.computeDirectionArrowMarkersOnScreen(
         track = polylineTrack,
@@ -203,10 +262,12 @@ private fun renderMapOverlays(
         },
         params = GpsUtil.appDirectionArrowParams(density)
     )
-
     // 軌跡は地図の auto-fit / zoom が終わった後に overlay として追加する。
     polylineSegments.forEach { segment ->
         drawPolyline(mapView, segment)
+    }
+    gpsGapSegments.forEach { segment ->
+        drawGpsGapBreakPolyline(mapView, segment)
     }
     directionMarkers.forEach { arrow ->
         mapView.overlays.add(Marker(mapView).apply {
@@ -280,6 +341,19 @@ private fun drawPolyline(mapView: MapView, segment: GpsUtil.TrackSegment) {
             GpsUtil.MarkerSurface.APP_MAP,
             mapView.context.resources.displayMetrics.density
         )
+        setPoints(segment.points.map { GeoPoint(it.lat, it.lon) })
+    }
+    mapView.overlays.add(polyline)
+}
+
+private fun drawGpsGapBreakPolyline(mapView: MapView, segment: GpsUtil.TrackSegment) {
+    val density = mapView.context.resources.displayMetrics.density
+    val strokeWidth = GpsUtil.mapTrackStrokeWidthPx(GpsUtil.MarkerSurface.APP_MAP, density)
+    val polyline = Polyline(mapView).apply {
+        outlinePaint.color = android.graphics.Color.rgb(245, 158, 11)
+        outlinePaint.strokeWidth = strokeWidth * 1.35f
+        outlinePaint.strokeCap = android.graphics.Paint.Cap.BUTT
+        outlinePaint.pathEffect = DashPathEffect(floatArrayOf(strokeWidth * 4.0f, strokeWidth * 2.4f), 0f)
         setPoints(segment.points.map { GeoPoint(it.lat, it.lon) })
     }
     mapView.overlays.add(polyline)
@@ -413,26 +487,27 @@ private fun createDirectionArrowDrawable(
     val textSize = GpsUtil.directionArrowTextSize(surface)
     val padding = GpsUtil.directionArrowBitmapPadding(surface)
     val outlineWidth = GpsUtil.directionArrowOutlineWidth(surface)
-    val outlinePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+    val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         this.color = android.graphics.Color.WHITE
         this.textSize = textSize
-        textAlign = android.graphics.Paint.Align.CENTER
-        typeface = android.graphics.Typeface.DEFAULT_BOLD
-        style = android.graphics.Paint.Style.STROKE
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+        style = Paint.Style.STROKE
         strokeWidth = outlineWidth
-        strokeJoin = android.graphics.Paint.Join.ROUND
+        strokeJoin = Paint.Join.ROUND
         strokeMiter = 10f
     }
-    val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+    val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         this.color = color
         this.textSize = textSize
-        textAlign = android.graphics.Paint.Align.CENTER
-        typeface = android.graphics.Typeface.DEFAULT_BOLD
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+        style = Paint.Style.FILL
     }
     val glyphWidth = maxOf(outlinePaint.measureText(">"), fillPaint.measureText(">"))
     val size = (maxOf(glyphWidth, textSize) + padding * 2).toInt().coerceAtLeast((textSize + padding).toInt())
     val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
-    val canvas = android.graphics.Canvas(bmp)
+    val canvas = Canvas(bmp)
     canvas.rotate(angleDeg, size / 2f, size / 2f)
     val baseline = size / 2f - (fillPaint.descent() + fillPaint.ascent()) / 2f
     canvas.drawText(">", size / 2f, baseline, outlinePaint)

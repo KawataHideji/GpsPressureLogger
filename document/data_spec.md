@@ -20,6 +20,7 @@
 - デバッグログは記録データと混在させない
 - アプリ内部の主記録生成周期は 3 秒を基準とする
 - 主記録は 3 秒スロットごとに欠損列を含む 1 レコードを持てる
+- 気圧 (`PresRaw` / `PresQnh`) は通常 3 分ごとのみ値を保存し、それ以外の主記録行では空欄を許容する。GPS と歩数の記録周期はこの間引きの影響を受けない
 - 交換 CSV は不定間隔レコードも許容する
 - 地図の線色、進行方向マーカー、歩数グラフ色、補正気圧系列色、停止標準化や動的 GPS 取得間隔などの表示・取得制御変更は、本仕様で定義する CSV / Room データ形式を変更しない
 - SAF export では、出力先 URI を開けない場合や書き込み例外が出た場合を失敗として扱い、0 byte ファイルを正しいバックアップとは見なさない
@@ -53,7 +54,9 @@ Timestamp,Lat,Lon,Alt,PresRaw,PresQnh,StepsDelta,GpsAccuracy
 Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAvg,KScalarAvg,KDirectionalityRatio,KVariance,TrKStatus,TrKRawStatus,TrKAvg,TrKDirectionalityRatio,WStatus,StepDeltaWindow,GpsIntervalMs,GpsImmediate,ConfirmedMode,ConstantRegionKind,ConstantRegionSpeedKmh,ConstantRegionStartLat,ConstantRegionStartLon,ConstantRegionEndLat,ConstantRegionEndLon,ConstantRegionStayLat,ConstantRegionStayLon,ConstantRegionDirectionDeg
 ```
 
-`AccelStddev3s` / `AccelMad3s` は旧方式互換列であり、新方式では空欄を許容する。新方式の正式な加速度状態は `stK` と呼ぶ。CSV / Room では既存互換のため列名 `KStatus` / `KRawStatus` / `KAvg` / `KVariance` を維持し、値は新方式では `STK1 / STK2 / STK4` を保存する。旧値 `K1 / K2_K3 / K4` は import / 表示再構成時に互換解釈する。外部バックアップ CSV は、現行判定で使う項目だけを出力する。加えて、`trK` の現在値を `TrK*` 列として 3 秒ごとに保存する。
+`AccelStddev3s` / `AccelMad3s` は旧方式互換列であり、新方式では空欄を許容する。新方式の正式な加速度状態は `stK` と呼ぶ。CSV / Room では既存互換のため `KStatus` / `KRawStatus` を維持し、値は新方式では `STK1 / STK2 / STK4` を保存する。旧値 `K1 / K2_K3 / K4` は import / 表示再構成時に互換解釈する。外部バックアップ CSV は、現行判定で使う項目だけを出力する。
+
+2026-05 以降の新規補助ログは、3 秒ごとの全サンプルではなく状態変化イベントを中心に保存する。表示側は時刻順に読み込み、`KStatus` / `TrKStatus` / `WStatus` / `ConfirmedMode` / `ConstantRegionKind` を前方補完して地図・グラフの状態を復元する。旧 `motion_metrics` の 3 秒サンプル形式は import / viewer 互換として引き続き受け入れる。
 
 追加列:
 
@@ -63,8 +66,10 @@ Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAv
 - `KScalarAvg`: 3 秒スロット全体の各サンプル加速度ノルム `|a_i|` の平均。動きの総量を表す
 - `KVariance`: 3 秒スロット全体の変換済み合成加速度ノルムの分散。平均加速ではなく、振動・揺れの大きさを捉えるために使う
 - `TrKStatus` / `TrKRawStatus`: 1 秒窓 `trK` の確定値 / raw 候補値。値は `ON / OFF`
-- `KAvg`: 3 秒窓の平均水平加速度ベクトルの大きさ `k`
-- `KDirectionalityRatio`: 3 秒窓の射影標準偏差比 `sigma / k`
+- `StKAvg`: 3 秒窓の平均水平加速度ベクトルの大きさ `k`。旧ヘッダ `KAvg` は import 互換として受け入れる
+- `StKRatio`: 3 秒窓の射影標準偏差比 `sigma / k`。旧ヘッダ `KDirectionalityRatio` は import 互換として受け入れる
+- `TrKAvg`: 1 秒窓の平均水平加速度ベクトルの大きさ `k`
+- `TrKRatio`: 1 秒窓の射影標準偏差比 `sigma / k`。`k` がほぼ 0 の場合など、ratio が成立しないときは空欄を記録する。旧ヘッダ `TrKDirectionalityRatio` は import 互換として受け入れる
 - `TrKAvg`: 直近 1 秒窓の平均水平加速度ベクトルの大きさ `k`
 - `TrKDirectionalityRatio`: 直近 1 秒窓の射影標準偏差比 `sigma / k`
 - `WStatus`: `W1 / W2`
@@ -94,9 +99,9 @@ import は、旧ヘッダ `Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRa
 
 方針:
 
-- 3 秒ごとに 1 レコードを記録する
+- 新規記録では状態変化点を中心に 1 レコードを記録する
 - 標準交換形式の記録 CSV とは混在させない
-- 判定用の基礎指標に加えて、新方式の `stK / trK / w-status / 確定モード / GPS 取得判断` を保持する。`trK` は表示モードへ直接は使わないが、閾値解析のため現在窓の値を 3 秒ごとに保存する
+- 判定用の基礎指標に加えて、新方式の `stK / trK / w-status / 確定モード / GPS 取得判断` を保持する。`trK` は表示モードへ直接は使わないが、`trK=ON` や `STK4` 変化点では `TrKAvg / TrKRatio / StKAvg / StKRatio` を保存し、閾値解析に使う
 - 加速度座標変換の source（RotationVector / accel+mag / device / norm fallback）は `KAccelSource` として CSV / Room に保存する。デバッグログの `accelSource` も実機調査用に維持する
 - 欠損値は空欄で表現する
 - これらの値は `完全停止 / 停止 / 徒歩 / 高速移動` のモード判定に利用する
@@ -195,7 +200,7 @@ import は、旧ヘッダ `Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRa
   - スロット内 GPS プール 1 件以上: `before` を含めない平均の `Lat / Lon` を採用
 - 停止 `STOPPED` は、完全停止寄りの平均化ルールを使う
 - `Alt` は GPS 座標の平均・スプライン補間には含めず、標高取得関数が保持する直近の有効 GPS 標高を採用する
-- 気圧はスロット時点の最新保持値を採用し、未初期化時のみ欠損とする
+- 気圧は 3 分ごとの記録スロットだけ最新保持値を採用し、それ以外の主記録行では欠損とする。表示では直近有効値を参照する
 - 歩数は 3 秒区間の増分を採用し、初期基準未確定時は `0` としてよい
 
 許可される例:
@@ -244,8 +249,9 @@ import は、旧ヘッダ `Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRa
 - 手動バックアップファイル名は `gps_pressure_full_backup_yyyyMMdd_HHmmss.csv` 形式を基本とする
 - 日常ログは app-specific external storage を優先し、利用不可時のみ内部保存へフォールバックする
 - 日常ログファイルは 03:00 区切り日単位で `gps_log_yyyyMMdd.csv` とする
-- 補助センサー判定ログの日次ファイルは 03:00 区切りで `motion_metrics_yyyyMMdd.csv` とする
-- 補助センサー判定ログの手動バックアップは `gps_pressure_motion_metrics_backup_yyyyMMdd_HHmmss.csv` を基本とする
+- 状態イベントログの日次ファイルは 03:00 区切りで `motion_events_yyyyMMdd.csv` とする
+- 状態イベントログの手動バックアップは `gps_pressure_motion_events_backup_yyyyMMdd_HHmmss.csv` を基本とする
+- 旧補助ログ `motion_metrics_yyyyMMdd.csv` / `gps_pressure_motion_metrics_backup_*.csv` は互換入力として扱う
 - 日次 CSV への追記は逐次書き込みではなく、既定 100 件ごとのまとめ書き出しを許容する
 - まとめ書き出し前のレコードはメモリバッファ上に保持し、手動 export、日次境界、サービス終了などのタイミングで強制フラッシュしてよい
 

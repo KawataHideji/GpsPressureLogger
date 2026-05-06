@@ -56,4 +56,5 @@
 - 定速領域の直線近似と `stay / constant move` 判定が、停止中・電車定速走行中・徒歩中の代表ログで自然か viewer と実機ログで確認する
 - `AccelManager` / `StepManager` 分離後、実機で加速度イベント・`TYPE_STEP_DETECTOR`・`TYPE_STEP_COUNTER` が `MotionStateManager` に届き、`KStatus(stK) / WStatus / StepsDelta` が継続更新されるか確認する
 - `MotionStateParams.stepResetHour` と表示側の `GpsUtil.LOGGING_RESET_HOUR` を、将来的に 1 つの設定源へ統合するか決める
-
+- 気圧を 3 分ごとのみ保存する新主記録で、ホーム画面・グラフウィジェット・Windows viewer が直近有効気圧を自然に表示できるか実機確認する
+- 状態イベントログ化後、旧 `motion_metrics` バックアップと新 `motion_events` バックアップの両方を viewer で読み、`AC / STAY / CMOV / tON` ラベルと前方補完された表示モードが一致するか確認する

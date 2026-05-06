@@ -23,9 +23,7 @@ object GpsUtil {
     private const val MAX_REASONABLE_SPEED_KMH = 300.0
     private const val MAX_REASONABLE_ACCURACY_M = 100f
     private const val SINGLE_POINT_SPIKE_MAX_DURATION_MS = 5 * 60_000L
-    private const val SINGLE_POINT_SPIKE_NEIGHBOR_DISTANCE_M = 80.0
-    private const val SINGLE_POINT_SPIKE_DETOUR_DISTANCE_M = 150.0
-    private const val SINGLE_POINT_SPIKE_DETOUR_RATIO = 4.0
+    private const val SINGLE_POINT_SPIKE_DEVIATION_SPEED_KMH = 100.0
     private const val TRANSIENT_DETOUR_MAX_DURATION_MS = 8 * 60_000L
     private const val TRANSIENT_DETOUR_MIN_NEIGHBOR_DISTANCE_M = 120.0
     private const val TRANSIENT_DETOUR_MIN_LATERAL_DISTANCE_M = 120.0
@@ -41,6 +39,13 @@ object GpsUtil {
     private const val MAP_SPLINE_SAMPLES_PER_SEGMENT = 5
     private const val MAP_SPLINE_EDGE_LINEAR_SEGMENTS = 0
     private const val MAP_SPLINE_TENSION = 0.55
+    private const val GPS_GAP_INTERPOLATION_MIN_MS = 60_000L
+    private const val GPS_GAP_INTERPOLATION_MAX_MS = 10 * 60_000L
+    private const val GPS_GAP_INTERPOLATION_INTERVAL_MS = 30_000L
+    private const val GPS_FREEZE_SAME_POINT_RADIUS_M = 3.0
+    private const val GPS_FREEZE_MIN_DURATION_MS = 2 * 60_000L
+    private const val GPS_FREEZE_RECOVERY_MIN_JUMP_M = 200.0
+    private const val GPS_FREEZE_RECOVERY_MIN_SPEED_KMH = 300.0
     private const val STOP_NORMALIZATION_MIN_DURATION_MS = 2 * 60_000L
     private const val STOP_NORMALIZATION_MIN_POINT_COUNT = 8
     private const val CLUSTER_HOP_DISTANCE_M = 180.0
@@ -270,7 +275,13 @@ object GpsUtil {
                 val dt = (e.timestamp - prev.timestamp) / 1000.0
                 val prevLat = prev.latitude ?: continue
                 val prevLon = prev.longitude ?: continue
-                if (dt > 0 && (haversineM(prevLat, prevLon, lat, lon) / dt * 3.6) > MAX_REASONABLE_SPEED_KMH) continue
+                if (
+                    dt > 0 &&
+                    (haversineM(prevLat, prevLon, lat, lon) / dt * 3.6) > MAX_REASONABLE_SPEED_KMH &&
+                    !isGpsFreezeRecovery(pass1, e)
+                ) {
+                    continue
+                }
             }
             pass1.add(e)
         }
@@ -279,6 +290,34 @@ object GpsUtil {
                 removeSinglePointSpikes(pass1)
             )
         )
+    }
+
+    private fun isGpsFreezeRecovery(previousEntries: List<LogEntry>, recovery: LogEntry): Boolean {
+        if (previousEntries.size < 2) return false
+        val recoveryLat = recovery.latitude ?: return false
+        val recoveryLon = recovery.longitude ?: return false
+        val lastFrozen = previousEntries.last()
+        val lastFrozenLat = lastFrozen.latitude ?: return false
+        val lastFrozenLon = lastFrozen.longitude ?: return false
+
+        var startIndex = previousEntries.lastIndex
+        while (startIndex > 0) {
+            val candidate = previousEntries[startIndex - 1]
+            val candidateLat = candidate.latitude ?: break
+            val candidateLon = candidate.longitude ?: break
+            if (haversineM(lastFrozenLat, lastFrozenLon, candidateLat, candidateLon) > GPS_FREEZE_SAME_POINT_RADIUS_M) {
+                break
+            }
+            startIndex -= 1
+        }
+
+        val freezeDurationMs = lastFrozen.timestamp - previousEntries[startIndex].timestamp
+        val jumpDistanceM = haversineM(lastFrozenLat, lastFrozenLon, recoveryLat, recoveryLon)
+        val jumpDtSec = ((recovery.timestamp - lastFrozen.timestamp).coerceAtLeast(1L)) / 1000.0
+        val jumpSpeedKmh = jumpDistanceM / jumpDtSec * 3.6
+        return freezeDurationMs >= GPS_FREEZE_MIN_DURATION_MS &&
+            jumpDistanceM >= GPS_FREEZE_RECOVERY_MIN_JUMP_M &&
+            jumpSpeedKmh >= GPS_FREEZE_RECOVERY_MIN_SPEED_KMH
     }
 
     /**
@@ -293,7 +332,7 @@ object GpsUtil {
             val prev = result.last()
             val current = entries[i]
             val next = entries[i + 1]
-            if (!isSinglePointSpike(prev, current, next)) {
+            if (isGpsFreezeRecovery(result, current) || !isSinglePointSpike(prev, current, next)) {
                 result += current
             }
         }
@@ -309,20 +348,20 @@ object GpsUtil {
         val nextLat = next.latitude ?: return false
         val nextLon = next.longitude ?: return false
 
-        val prevToNext = haversineM(prevLat, prevLon, nextLat, nextLon)
-        if (prevToNext > SINGLE_POINT_SPIKE_NEIGHBOR_DISTANCE_M) return false
-
-        val prevToCurrent = haversineM(prevLat, prevLon, curLat, curLon)
-        val currentToNext = haversineM(curLat, curLon, nextLat, nextLon)
-        val detour = minOf(prevToCurrent, currentToNext)
-        if (detour < SINGLE_POINT_SPIKE_DETOUR_DISTANCE_M) return false
-
         val dtPrevMs = current.timestamp - prev.timestamp
         val dtNextMs = next.timestamp - current.timestamp
         if (dtPrevMs !in 1..SINGLE_POINT_SPIKE_MAX_DURATION_MS) return false
         if (dtNextMs !in 1..SINGLE_POINT_SPIKE_MAX_DURATION_MS) return false
 
-        return detour >= prevToNext * SINGLE_POINT_SPIKE_DETOUR_RATIO
+        val dtTotalMs = next.timestamp - prev.timestamp
+        if (dtTotalMs <= 0L) return false
+        val fraction = ((current.timestamp - prev.timestamp).toDouble() / dtTotalMs.toDouble())
+            .coerceIn(0.0, 1.0)
+        val expectedLat = prevLat + (nextLat - prevLat) * fraction
+        val expectedLon = prevLon + (nextLon - prevLon) * fraction
+        val deviationM = haversineM(expectedLat, expectedLon, curLat, curLon)
+        val deviationSpeedKmh = (2.0 * deviationM) / (dtTotalMs / 1000.0) * 3.6
+        return deviationSpeedKmh >= SINGLE_POINT_SPIKE_DEVIATION_SPEED_KMH
     }
 
     /**
@@ -337,7 +376,7 @@ object GpsUtil {
             val prev = result.last()
             val current = entries[i]
             val next = entries[i + 1]
-            if (!isTransientDetour(prev, current, next)) {
+            if (isGpsFreezeRecovery(result, current) || !isTransientDetour(prev, current, next)) {
                 result += current
             }
         }
@@ -467,7 +506,11 @@ object GpsUtil {
                 clusterPointCount in 1..ISOLATED_CLUSTER_MAX_POINTS &&
                 clusterDuration in 0..ISOLATED_CLUSTER_MAX_DURATION_MS
             ) {
-                for (idx in clusterStart..clusterEnd) keep[idx] = false
+                for (idx in clusterStart..clusterEnd) {
+                    if (!isGpsFreezeRecovery(entries.subList(0, idx), entries[idx])) {
+                        keep[idx] = false
+                    }
+                }
                 i = endBoundary + 1
             } else {
                 i++
@@ -603,7 +646,8 @@ object GpsUtil {
         val distRatio: Float,
         val displayMode: MovementDetector.Mode = MovementDetector.Mode.UNKNOWN,
         val isStop: Boolean = false, // STAY 領域を stay point 1 点へ畳んだ代表点
-        val stopCount: Int = 0
+        val stopCount: Int = 0,
+        val isGapBreak: Boolean = false
     )
 
     data class TrackSegment(
@@ -831,7 +875,8 @@ object GpsUtil {
     fun buildDisplayPolyline(
         entries: List<LogEntry>,
         motionSamples: List<MotionSample>,
-        windowRadius: Int = DISPLAY_SMOOTHING_WINDOW_RADIUS
+        windowRadius: Int = DISPLAY_SMOOTHING_WINDOW_RADIUS,
+        splineSamplesPerSegment: Int = MAP_SPLINE_SAMPLES_PER_SEGMENT
     ): List<TrackPoint> {
         val locatedEntries = entries.filter { it.hasLocation }
         if (locatedEntries.isEmpty()) return emptyList()
@@ -843,8 +888,95 @@ object GpsUtil {
         } else {
             rawEntriesToTrack(locatedEntries)
         }
-        val smoothedTrack = smoothPolylineTrack(baseTrack, windowRadius)
-        return splineMovingTrack(smoothedTrack)
+        val freezeAwareTrack = markGpsFreezeBreaks(baseTrack)
+        val interpolatedTrack = interpolateGpsGapsForDisplay(freezeAwareTrack)
+        val smoothedTrack = smoothPolylineTrack(interpolatedTrack, windowRadius)
+        return splineMovingTrack(smoothedTrack, samplesPerSegment = splineSamplesPerSegment)
+    }
+
+    private fun markGpsFreezeBreaks(track: List<TrackPoint>): List<TrackPoint> {
+        if (track.size < 3) return track
+        val result = track.toMutableList()
+        var index = 0
+        while (index < result.lastIndex) {
+            val start = result[index]
+            var end = index + 1
+            while (
+                end < result.size &&
+                haversineM(start.lat, start.lon, result[end].lat, result[end].lon) <= GPS_FREEZE_SAME_POINT_RADIUS_M
+            ) {
+                end += 1
+            }
+
+            val lastFrozenIndex = end - 1
+            val recoveryIndex = end
+            if (lastFrozenIndex > index && recoveryIndex < result.size) {
+                val durationMs = result[lastFrozenIndex].timestamp - start.timestamp
+                val lastFrozen = result[lastFrozenIndex]
+                val recovery = result[recoveryIndex]
+                val jumpDistanceM = haversineM(lastFrozen.lat, lastFrozen.lon, recovery.lat, recovery.lon)
+                val jumpDtSec = ((recovery.timestamp - lastFrozen.timestamp).coerceAtLeast(1L)) / 1000.0
+                val jumpSpeedKmh = jumpDistanceM / jumpDtSec * 3.6
+                if (
+                    durationMs >= GPS_FREEZE_MIN_DURATION_MS &&
+                    jumpDistanceM >= GPS_FREEZE_RECOVERY_MIN_JUMP_M &&
+                    jumpSpeedKmh >= GPS_FREEZE_RECOVERY_MIN_SPEED_KMH
+                ) {
+                    result[recoveryIndex] = recovery.copy(isGapBreak = true)
+                }
+            }
+            index = end.coerceAtLeast(index + 1)
+        }
+        return result
+    }
+
+    private fun interpolateGpsGapsForDisplay(track: List<TrackPoint>): List<TrackPoint> {
+        if (track.size < 2) return track
+        val result = mutableListOf<TrackPoint>()
+        for (index in 0 until track.lastIndex) {
+            val start = track[index]
+            val end = track[index + 1]
+            result += start
+
+            val gapMs = end.timestamp - start.timestamp
+            if (
+                gapMs !in GPS_GAP_INTERPOLATION_MIN_MS..GPS_GAP_INTERPOLATION_MAX_MS ||
+                start.isStop ||
+                end.isStop ||
+                end.isGapBreak
+            ) {
+                continue
+            }
+
+            var ts = start.timestamp + GPS_GAP_INTERPOLATION_INTERVAL_MS
+            while (ts < end.timestamp) {
+                val ratio = (ts - start.timestamp).toDouble() / gapMs.toDouble()
+                result += TrackPoint(
+                    lat = start.lat + (end.lat - start.lat) * ratio,
+                    lon = start.lon + (end.lon - start.lon) * ratio,
+                    timestamp = ts,
+                    distRatio = 0f,
+                    displayMode = if (ratio < 0.5) start.displayMode else end.displayMode,
+                    isStop = false
+                )
+                ts += GPS_GAP_INTERPOLATION_INTERVAL_MS
+            }
+        }
+        result += track.last()
+        return recalculateTrackDistanceRatio(result)
+    }
+
+    private fun recalculateTrackDistanceRatio(track: List<TrackPoint>): List<TrackPoint> {
+        if (track.isEmpty()) return track
+        val cumulativeDistances = mutableListOf(0.0)
+        for (index in 1 until track.size) {
+            cumulativeDistances += cumulativeDistances.last() +
+                haversineM(track[index - 1].lat, track[index - 1].lon, track[index].lat, track[index].lon)
+        }
+        val totalDistance = cumulativeDistances.last().coerceAtLeast(1.0)
+        return track.mapIndexed { index, point ->
+            point.copy(distRatio = (cumulativeDistances[index] / totalDistance).toFloat())
+        }
     }
 
     private fun rawEntriesToTrack(locatedEntries: List<LogEntry>): List<TrackPoint> {
@@ -897,8 +1029,9 @@ object GpsUtil {
             val currentMode = baseTrack[index].displayMode
             if (
                 baseTrack[index].isStop ||
+                baseTrack[index].isGapBreak ||
                 currentMode == MovementDetector.Mode.VEHICLE ||
-                neighbors.any { it.isStop || it.displayMode != currentMode }
+                neighbors.any { it.isStop || it.isGapBreak || it.displayMode != currentMode }
             ) {
                 continue
             }
@@ -929,12 +1062,12 @@ object GpsUtil {
                 index += 1
                 continue
             }
-
             val chunkMode = track[index].displayMode
             var endExclusive = index + 1
             while (
                 endExclusive < track.size &&
                 !track[endExclusive].isStop &&
+                !track[endExclusive].isGapBreak &&
                 track[endExclusive].displayMode == chunkMode
             ) {
                 endExclusive += 1
@@ -1064,6 +1197,12 @@ object GpsUtil {
         for (index in 1 until track.size) {
             val point = track[index]
             val previous = track[index - 1]
+            if (point.isGapBreak) {
+                flushSegment()
+                currentMode = point.displayMode
+                currentPoints += point
+                continue
+            }
             if (previous.isStop || point.isStop) {
                 flushSegment()
                 if (!point.isStop) {
@@ -1092,6 +1231,34 @@ object GpsUtil {
         return segments
     }
 
+    fun buildGpsGapBreakSegments(track: List<TrackPoint>): List<TrackSegment> {
+        if (track.size < 2) return emptyList()
+        val segments = mutableListOf<TrackSegment>()
+        for (index in 1 until track.size) {
+            val recovery = track[index]
+            if (!recovery.isGapBreak) continue
+            var startIndex = index - 1
+            val frozenAnchor = track[startIndex]
+            while (
+                startIndex > 0 &&
+                !track[startIndex - 1].isGapBreak &&
+                haversineM(
+                    frozenAnchor.lat,
+                    frozenAnchor.lon,
+                    track[startIndex - 1].lat,
+                    track[startIndex - 1].lon
+                ) <= GPS_FREEZE_SAME_POINT_RADIUS_M
+            ) {
+                startIndex -= 1
+            }
+            segments += TrackSegment(
+                displayMode = recovery.displayMode,
+                points = listOf(track[startIndex], recovery)
+            )
+        }
+        return segments
+    }
+
     fun computeDirectionArrowMarkers(
         track: List<TrackPoint>,
         params: DirectionArrowParams = DirectionArrowParams()
@@ -1099,9 +1266,9 @@ object GpsUtil {
         val markers = mutableListOf<DirectionArrowMarker>()
         var index = 0
         while (index < track.size) {
-            while (index < track.size && track[index].isStop) index += 1
+            while (index < track.size && (track[index].isStop || track[index].isGapBreak)) index += 1
             val start = index
-            while (index < track.size && !track[index].isStop) index += 1
+            while (index < track.size && !track[index].isStop && !track[index].isGapBreak) index += 1
             if (index - start >= 3) {
                 markers += computeDirectionArrowMarkersForChunk(track.subList(start, index), params)
             }
@@ -1117,9 +1284,9 @@ object GpsUtil {
         val markers = mutableListOf<DirectionArrowMarker>()
         var index = 0
         while (index < track.size) {
-            while (index < track.size && track[index].isStop) index += 1
+            while (index < track.size && (track[index].isStop || track[index].isGapBreak)) index += 1
             val start = index
-            while (index < track.size && !track[index].isStop) index += 1
+            while (index < track.size && !track[index].isStop && !track[index].isGapBreak) index += 1
             if (index - start >= 3) {
                 markers += computeDirectionArrowMarkersForScreenChunk(
                     track = track.subList(start, index),
@@ -1202,52 +1369,99 @@ object GpsUtil {
         if (totalDistance < params.startEndSkipPx * 2f) return emptyList()
 
         val markers = mutableListOf<DirectionArrowMarker>()
-        var lastPlacedDistance = -params.minSpacingPx
-        for (index in 1 until track.lastIndex) {
-            val distanceAlong = cumulativeDistance[index]
-            if (distanceAlong < params.startEndSkipPx) continue
-            if ((totalDistance - distanceAlong) < params.startEndSkipPx) continue
-            if ((distanceAlong - lastPlacedDistance) < params.minSpacingPx) continue
-
-            val localAngles = mutableListOf<Double>()
-            val localStart = max(0, index - params.localBearingWindow)
-            val localEnd = min(track.lastIndex - 1, index + params.localBearingWindow)
-            for (segmentIndex in localStart..localEnd) {
-                val (startX, startY) = screenPoints[segmentIndex]
-                val (endX, endY) = screenPoints[segmentIndex + 1]
-                val segmentDistance = hypot(endX - startX, endY - startY)
-                if (segmentDistance < params.minSegmentPx) continue
-                localAngles += Math.toDegrees(
-                    atan2(
-                        (endY - startY).toDouble(),
-                        (endX - startX).toDouble()
-                    )
-                )
+        var distanceAlong = params.startEndSkipPx
+        val endDistance = totalDistance - params.startEndSkipPx
+        while (distanceAlong <= endDistance) {
+            val center = interpolateTrackAtScreenDistance(track, screenPoints, cumulativeDistance, distanceAlong)
+                ?: run {
+                    distanceAlong += params.minSpacingPx
+                    continue
+                }
+            val before = interpolateTrackAtScreenDistance(
+                track,
+                screenPoints,
+                cumulativeDistance,
+                (distanceAlong - params.minSegmentPx).coerceAtLeast(0f)
+            )
+            val after = interpolateTrackAtScreenDistance(
+                track,
+                screenPoints,
+                cumulativeDistance,
+                (distanceAlong + params.minSegmentPx).coerceAtMost(totalDistance)
+            )
+            if (before == null || after == null) {
+                distanceAlong += params.minSpacingPx
+                continue
             }
-            val meanAngle = if (localAngles.isNotEmpty()) {
-                circularMeanDegrees(localAngles)
-            } else {
-                val (startX, startY) = screenPoints[localStart]
-                val (endX, endY) = screenPoints[min(track.lastIndex, index + params.localBearingWindow)]
-                val tangentDistance = hypot(endX - startX, endY - startY)
-                if (tangentDistance < params.minSegmentPx) continue
-                Math.toDegrees(
-                    atan2(
-                        (endY - startY).toDouble(),
-                        (endX - startX).toDouble()
-                    )
-                )
+            val tangentDistance = hypot(after.screenX - before.screenX, after.screenY - before.screenY)
+            if (tangentDistance < params.minSegmentPx) {
+                distanceAlong += params.minSpacingPx
+                continue
             }
+            val meanAngle = Math.toDegrees(
+                atan2(
+                    (after.screenY - before.screenY).toDouble(),
+                    (after.screenX - before.screenX).toDouble()
+                )
+            )
 
             markers += DirectionArrowMarker(
-                lat = track[index].lat,
-                lon = track[index].lon,
+                lat = center.lat,
+                lon = center.lon,
                 angleDeg = meanAngle.toFloat(),
-                displayMode = track[index].displayMode
+                displayMode = center.displayMode
             )
-            lastPlacedDistance = distanceAlong
+            distanceAlong += params.minSpacingPx
         }
         return markers
+    }
+
+    private data class ScreenTrackSample(
+        val lat: Double,
+        val lon: Double,
+        val screenX: Float,
+        val screenY: Float,
+        val displayMode: MovementDetector.Mode
+    )
+
+    private fun interpolateTrackAtScreenDistance(
+        track: List<TrackPoint>,
+        screenPoints: List<Pair<Float, Float>>,
+        cumulativeDistance: FloatArray,
+        targetDistance: Float
+    ): ScreenTrackSample? {
+        if (track.isEmpty()) return null
+        if (targetDistance <= 0f) {
+            val (x, y) = screenPoints.first()
+            val point = track.first()
+            return ScreenTrackSample(point.lat, point.lon, x, y, point.displayMode)
+        }
+        val totalDistance = cumulativeDistance.last()
+        if (targetDistance >= totalDistance) {
+            val (x, y) = screenPoints.last()
+            val point = track.last()
+            return ScreenTrackSample(point.lat, point.lon, x, y, point.displayMode)
+        }
+
+        var high = cumulativeDistance.binarySearch(targetDistance)
+        if (high < 0) high = -high - 1
+        if (high <= 0 || high >= track.size) return null
+
+        val low = high - 1
+        val segmentDistance = cumulativeDistance[high] - cumulativeDistance[low]
+        if (segmentDistance <= 0f) return null
+        val ratio = ((targetDistance - cumulativeDistance[low]) / segmentDistance).coerceIn(0f, 1f)
+        val start = track[low]
+        val end = track[high]
+        val (startX, startY) = screenPoints[low]
+        val (endX, endY) = screenPoints[high]
+        return ScreenTrackSample(
+            lat = start.lat + (end.lat - start.lat) * ratio,
+            lon = start.lon + (end.lon - start.lon) * ratio,
+            screenX = startX + (endX - startX) * ratio,
+            screenY = startY + (endY - startY) * ratio,
+            displayMode = if (ratio < 0.5f) start.displayMode else end.displayMode
+        )
     }
 
     fun inferDisplayModes(
@@ -1375,20 +1589,19 @@ object GpsUtil {
                 return@forEachIndexed
             }
 
-            // 確定ポイント以降だけ、現在まで続く未確定区間として暫定表示する。
-            if (index > lastConfirmedIndex) {
-                provisionalModeFromNewState(
+            // 新しい motion 記録は変化点イベントだけを保存するため、confirmedMode が
+            // 空でも stK / W / region から表示モードを前方補完できる状態点として扱う。
+            provisionalModeFromNewState(
+                sample = sample,
+                locatedEntries = locatedEntries,
+                constantRegionKind = constantRegionKind,
+                allowOpenRegionFallback = index > lastConfirmedIndex
+            )?.let { provisionalMode ->
+                result += modeStateFromSample(
                     sample = sample,
-                    locatedEntries = locatedEntries,
-                    constantRegionKind = constantRegionKind,
-                    allowOpenRegionFallback = true
-                )?.let { provisionalMode ->
-                    result += modeStateFromSample(
-                        sample = sample,
-                        mode = provisionalMode,
-                        constantRegionKind = constantRegionKind
-                    )
-                }
+                    mode = provisionalMode,
+                    constantRegionKind = constantRegionKind
+                )
             }
         }
 
@@ -1969,12 +2182,13 @@ object GpsUtil {
         val lat: Double,
         val lon: Double,
         val text: String,
-        val bgColor: Int
+        val bgColor: Int,
+        val timestamp: Long = 0L
     )
 
     /**
-     * MotionSample の stK / wStatus / constantRegionKind の遷移点を GPS 座標と紐付け、
-     * 状態ラベルの一覧を返す。
+     * MotionSample の stK / constantRegionKind の遷移点を GPS 座標と紐付け、
+     * 状態イベントラベルの一覧を返す。
      *
      * 同じ状態が続く間はラベルを出さず、変化したときだけ1件追加する。
      * これにより 3 秒ごとに大量のラベルが出ることを防ぐ。
@@ -1987,38 +2201,27 @@ object GpsUtil {
         val sorted = motionSamples.sortedBy { it.timestamp }
         val labels = mutableListOf<StateLabel>()
         var prevStK: StKStatus? = null
-        var prevW: String? = null
         var prevRegion: ConstantRegionKind? = null
 
         for (sample in sorted) {
             val stK = StKStatus.fromStored(sample.kStatus)
-            val w = sample.wStatus
             val region = parseConstantRegionKind(sample.constantRegionKind)
 
             val stKChanged = stK != null && stK != prevStK
-            val wChanged = w != null && w != prevW
             val regionChanged = region != prevRegion
 
-            if (stKChanged || wChanged || regionChanged) {
-                val nearest = nearestLocatedEntry(locatedEntries, sample.timestamp)
-                val lat = nearest?.latitude
-                val lon = nearest?.longitude
+            if (stKChanged || regionChanged) {
+                val location = displayLocationAt(locatedEntries, sample.timestamp)
+                val lat = location?.first
+                val lon = location?.second
                 if (lat != null && lon != null) {
-                    if (stKChanged) {
-                        val text = when (stK) {
-                            StKStatus.STK1 -> "K1"
-                            StKStatus.STK2 -> "K2"
-                            StKStatus.STK4 -> "K4"
-                        }
-                        labels += StateLabel(lat, lon, text, stKLabelColor(stK))
-                    }
-                    if (wChanged) {
-                        labels += StateLabel(lat, lon, w, wLabelColor(w))
+                    if (stKChanged && stK == StKStatus.STK4) {
+                        labels += StateLabel(lat, lon, "AC", STATE_LABEL_COLOR_STK4, sample.timestamp)
                     }
                     if (regionChanged) {
                         when (region) {
-                            ConstantRegionKind.STAY          -> labels += StateLabel(lat, lon, "STAY", STATE_LABEL_COLOR_STAY)
-                            ConstantRegionKind.CONSTANT_MOVE -> labels += StateLabel(lat, lon, "CMOV", STATE_LABEL_COLOR_CMOVE)
+                            ConstantRegionKind.STAY          -> labels += StateLabel(lat, lon, "STAY", STATE_LABEL_COLOR_STAY, sample.timestamp)
+                            ConstantRegionKind.CONSTANT_MOVE -> labels += StateLabel(lat, lon, "CMOV", STATE_LABEL_COLOR_CMOVE, sample.timestamp)
                             else -> {}
                         }
                     }
@@ -2026,7 +2229,6 @@ object GpsUtil {
             }
 
             if (stK != null) prevStK = stK
-            if (w != null) prevW = w
             prevRegion = region
         }
         return labels
@@ -2035,7 +2237,7 @@ object GpsUtil {
     /**
      * MotionSample の trK 遷移点を GPS 座標と紐付け、トリガーラベル一覧を返す。
      *
-     * trK は GPS 即時取得 / 短周期復帰の制御用トリガーなので、ON/OFF の変化点だけを表示する。
+     * trK は GPS 即時取得 / 短周期復帰の制御用トリガーなので、ON 変化点だけを表示する。
      */
     fun buildTrkLabels(entries: List<LogEntry>, motionSamples: List<MotionSample>): List<StateLabel> {
         if (entries.isEmpty() || motionSamples.isEmpty()) return emptyList()
@@ -2049,21 +2251,39 @@ object GpsUtil {
         for (sample in sorted) {
             val trK = parseTrKStatus(sample.trKStatus)
             if (trK != null && trK != prevTrK) {
-                val nearest = nearestLocatedEntry(locatedEntries, sample.timestamp)
-                val lat = nearest?.latitude
-                val lon = nearest?.longitude
-                if (lat != null && lon != null) {
+                val location = displayLocationAt(locatedEntries, sample.timestamp)
+                val lat = location?.first
+                val lon = location?.second
+                if (lat != null && lon != null && trK == TrKStatus.ON) {
                     labels += StateLabel(
                         lat = lat,
                         lon = lon,
-                        text = if (trK == TrKStatus.ON) "tON" else "tOFF",
-                        bgColor = if (trK == TrKStatus.ON) STATE_LABEL_COLOR_TRK_ON else STATE_LABEL_COLOR_TRK_OFF
+                        text = "tON",
+                        bgColor = STATE_LABEL_COLOR_TRK_ON,
+                        timestamp = sample.timestamp
                     )
                 }
             }
             if (trK != null) prevTrK = trK
         }
-        return labels
+        return dedupeNearbyLabels(labels, minDistanceM = 35.0, minTimeMs = 20 * 60_000L)
+    }
+
+    private fun dedupeNearbyLabels(
+        labels: List<StateLabel>,
+        minDistanceM: Double,
+        minTimeMs: Long
+    ): List<StateLabel> {
+        val kept = mutableListOf<StateLabel>()
+        for (label in labels) {
+            val duplicate = kept.any { previous ->
+                previous.text == label.text &&
+                    abs(previous.timestamp - label.timestamp) <= minTimeMs &&
+                    haversineM(previous.lat, previous.lon, label.lat, label.lon) <= minDistanceM
+            }
+            if (!duplicate) kept += label
+        }
+        return kept
     }
 
     /**
@@ -2082,6 +2302,42 @@ object GpsUtil {
                 if (timestamp - before.timestamp <= after.timestamp - timestamp) before else after
             }
         }
+    }
+
+    private fun displayLocationAt(locatedEntries: List<LogEntry>, timestamp: Long): Pair<Double, Double>? {
+        if (locatedEntries.isEmpty()) return null
+        var idx = locatedEntries.binarySearch { it.timestamp.compareTo(timestamp) }
+        if (idx >= 0) {
+            val entry = locatedEntries[idx]
+            val lat = entry.latitude
+            val lon = entry.longitude
+            return if (lat != null && lon != null) lat to lon else null
+        }
+        idx = -(idx + 1)
+        if (idx in 1 until locatedEntries.size) {
+            val before = locatedEntries[idx - 1]
+            val after = locatedEntries[idx]
+            val gapMs = after.timestamp - before.timestamp
+            val beforeLat = before.latitude
+            val beforeLon = before.longitude
+            val afterLat = after.latitude
+            val afterLon = after.longitude
+            if (
+                gapMs in GPS_GAP_INTERPOLATION_MIN_MS..GPS_GAP_INTERPOLATION_MAX_MS &&
+                beforeLat != null &&
+                beforeLon != null &&
+                afterLat != null &&
+                afterLon != null
+            ) {
+                val ratio = (timestamp - before.timestamp).toDouble() / gapMs.toDouble()
+                return (beforeLat + (afterLat - beforeLat) * ratio) to
+                    (beforeLon + (afterLon - beforeLon) * ratio)
+            }
+        }
+        val nearest = nearestLocatedEntry(locatedEntries, timestamp)
+        val lat = nearest?.latitude
+        val lon = nearest?.longitude
+        return if (lat != null && lon != null) lat to lon else null
     }
 
     private fun stKLabelColor(stK: StKStatus): Int = when (stK) {

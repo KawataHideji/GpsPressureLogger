@@ -18,8 +18,10 @@ DEFAULT_CONVERTED_GLOB = "gps_pressure_full_backup_converted*.csv"
 DEFAULT_ANDROID_DIR = Path(r"C:\MyDrive\android")
 DEFAULT_CONVERTER_DIR = PROJECT_DIR / "log_converter"
 MOTION_BACKUP_PREFIX = "gps_pressure_motion_metrics_backup_"
+MOTION_EVENT_BACKUP_PREFIX = "gps_pressure_motion_events_backup_"
 MOTION_BACKUP_PREFIX_LEGACY = "gps_pressure_motion_metrics_"
 MOTION_DAILY_PREFIX = "motion_metrics_"
+MOTION_EVENT_DAILY_PREFIX = "motion_events_"
 EVENT_PATTERN = re.compile(r"^# EVENT\s+(\d+)\s+(.*)$")
 MODE_CONFIRMED_PATTERN = re.compile(r"^MODE_CONFIRMED:\s+([A-Z_]+)\s+->\s+([A-Z_]+)")
 DEFAULT_SESSION_GAP_MINUTES = 20
@@ -27,9 +29,14 @@ GRAPH_INTERVAL_MS = 60_000
 MAX_REASONABLE_SPEED_KMH = 300.0
 MAX_REASONABLE_ACCURACY_M = 100.0
 SINGLE_POINT_SPIKE_MAX_DURATION_MS = 5 * 60_000
-SINGLE_POINT_SPIKE_NEIGHBOR_DISTANCE_M = 80.0
-SINGLE_POINT_SPIKE_DETOUR_DISTANCE_M = 150.0
-SINGLE_POINT_SPIKE_DETOUR_RATIO = 4.0
+SINGLE_POINT_SPIKE_DEVIATION_SPEED_KMH = 100.0
+GPS_GAP_INTERPOLATION_MIN_MS = 60_000
+GPS_GAP_INTERPOLATION_MAX_MS = 10 * 60_000
+GPS_GAP_INTERPOLATION_INTERVAL_MS = 30_000
+GPS_FREEZE_SAME_POINT_RADIUS_M = 3.0
+GPS_FREEZE_MIN_DURATION_MS = 2 * 60_000
+GPS_FREEZE_RECOVERY_MIN_JUMP_M = 200.0
+GPS_FREEZE_RECOVERY_MIN_SPEED_KMH = 300.0
 TRANSIENT_DETOUR_MAX_DURATION_MS = 8 * 60_000
 TRANSIENT_DETOUR_MIN_NEIGHBOR_DISTANCE_M = 120.0
 TRANSIENT_DETOUR_MIN_LATERAL_DISTANCE_M = 120.0
@@ -241,6 +248,10 @@ def resolve_motion_csv_path(csv_path: Path, motion_csv_path_arg: str | None = No
     if motion_csv_path_arg:
         candidate = Path(motion_csv_path_arg)
         return candidate if candidate.exists() else candidate
+
+    def usable_motion_file(path: Path) -> bool:
+        return path.exists() and path.resolve() != csv_path.resolve() and path.stat().st_size > 0
+
     parent = csv_path.parent
     stem = csv_path.stem
     candidates = []
@@ -249,11 +260,13 @@ def resolve_motion_csv_path(csv_path: Path, motion_csv_path_arg: str | None = No
     backup_match = re.match(r"gps_pressure_full_backup_(\d{8}_\d{6})$", stem)
     if backup_match:
         for search_dir in search_dirs:
+            candidates.append(search_dir / f"{MOTION_EVENT_BACKUP_PREFIX}{backup_match.group(1)}.csv")
             candidates.append(search_dir / f"{MOTION_BACKUP_PREFIX}{backup_match.group(1)}.csv")
             candidates.append(search_dir / f"{MOTION_BACKUP_PREFIX_LEGACY}{backup_match.group(1)}.csv")
 
     daily_match = re.match(r"(?:gps_log|gps_pressure)_(\d{8})$", stem)
     if daily_match:
+        candidates.extend(search_dir / f"{MOTION_EVENT_DAILY_PREFIX}{daily_match.group(1)}.csv" for search_dir in search_dirs)
         candidates.extend(search_dir / f"{MOTION_DAILY_PREFIX}{daily_match.group(1)}.csv" for search_dir in search_dirs)
 
     date_match = re.search(r"(\d{8})", stem)
@@ -261,13 +274,30 @@ def resolve_motion_csv_path(csv_path: Path, motion_csv_path_arg: str | None = No
         date_text = date_match.group(1)
         for search_dir in search_dirs:
             if search_dir.exists():
+                candidates.extend(sorted(search_dir.glob(f"{MOTION_EVENT_BACKUP_PREFIX}{date_text}_*.csv"), reverse=True))
                 candidates.extend(sorted(search_dir.glob(f"{MOTION_BACKUP_PREFIX}{date_text}_*.csv"), reverse=True))
                 candidates.extend(sorted(search_dir.glob(f"{MOTION_BACKUP_PREFIX_LEGACY}{date_text}_*.csv"), reverse=True))
+            candidates.append(search_dir / f"{MOTION_EVENT_DAILY_PREFIX}{date_text}.csv")
             candidates.append(search_dir / f"{MOTION_DAILY_PREFIX}{date_text}.csv")
 
     for candidate in candidates:
-        if candidate.exists() and candidate.resolve() != csv_path.resolve():
+        if usable_motion_file(candidate):
             return candidate
+
+    latest_candidates = []
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+        latest_candidates.extend(search_dir.glob(f"{MOTION_EVENT_BACKUP_PREFIX}*.csv"))
+        latest_candidates.extend(search_dir.glob(f"{MOTION_BACKUP_PREFIX}*.csv"))
+        latest_candidates.extend(search_dir.glob(f"{MOTION_BACKUP_PREFIX_LEGACY}*.csv"))
+    latest_candidates = sorted(
+        (path for path in latest_candidates if usable_motion_file(path)),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if latest_candidates:
+        return latest_candidates[0]
     return None
 
 
@@ -308,9 +338,13 @@ def load_motion_samples(motion_csv_path: Path | None):
                 "GpsIntervalMs": to_int(get_header_value(values, index_by_name, ["GpsIntervalMs"])),
                 "GpsImmediate": get_header_bool(values, index_by_name, ["GpsImmediate"]),
                 "KStatus": get_header_value(values, index_by_name, ["KStatus"]) or None,
+                "StKAvg": to_float(get_header_value(values, index_by_name, ["StKAvg", "KAvg"])),
+                "StKRatio": to_float(get_header_value(values, index_by_name, ["StKRatio", "KDirectionalityRatio"])),
                 "KAccelSource": get_header_value(values, index_by_name, ["KAccelSource"]) or None,
                 "TrKStatus": get_header_value(values, index_by_name, ["TrKStatus"]) or None,
                 "TrKRawStatus": get_header_value(values, index_by_name, ["TrKRawStatus"]) or None,
+                "TrKAvg": to_float(get_header_value(values, index_by_name, ["TrKAvg"])),
+                "TrKRatio": to_float(get_header_value(values, index_by_name, ["TrKRatio", "TrKDirectionalityRatio"])),
                 "WStatus": get_header_value(values, index_by_name, ["WStatus"]) or None,
             })
     samples.sort(key=lambda sample: sample["Timestamp"])
@@ -759,11 +793,11 @@ def haversine_m(lat1, lon1, lat2, lon2):
 
 
 def map_filter_outliers(rows):
-    location_rows = [
+    location_rows = mark_gps_freeze_breaks([
         dict(row)
         for row in rows
         if row["GpsValid"] and (row.get("GpsAccuracy") is None or row.get("GpsAccuracy") <= MAX_REASONABLE_ACCURACY_M)
-    ]
+    ])
     if len(location_rows) <= 2:
         return location_rows
 
@@ -774,7 +808,7 @@ def map_filter_outliers(rows):
             dt_sec = (entry["Timestamp"] - previous["Timestamp"]) / 1000.0
             if dt_sec > 0:
                 speed_kmh = haversine_m(previous["Lat"], previous["Lon"], entry["Lat"], entry["Lon"]) / dt_sec * 3.6
-                if speed_kmh > MAX_REASONABLE_SPEED_KMH:
+                if speed_kmh > MAX_REASONABLE_SPEED_KMH and not entry.get("GpsGapBreak"):
                     continue
         pass1.append(entry)
 
@@ -789,23 +823,13 @@ def remove_single_point_spikes(rows):
         previous = result[-1]
         current = rows[index]
         following = rows[index + 1]
-        if not is_single_point_spike(previous, current, following):
+        if current.get("GpsGapBreak") or not is_single_point_spike(previous, current, following):
             result.append(current)
     result.append(rows[-1])
     return result
 
 
 def is_single_point_spike(previous, current, following):
-    previous_to_next = haversine_m(previous["Lat"], previous["Lon"], following["Lat"], following["Lon"])
-    if previous_to_next > SINGLE_POINT_SPIKE_NEIGHBOR_DISTANCE_M:
-        return False
-
-    previous_to_current = haversine_m(previous["Lat"], previous["Lon"], current["Lat"], current["Lon"])
-    current_to_next = haversine_m(current["Lat"], current["Lon"], following["Lat"], following["Lon"])
-    detour = min(previous_to_current, current_to_next)
-    if detour < SINGLE_POINT_SPIKE_DETOUR_DISTANCE_M:
-        return False
-
     dt_prev_ms = current["Timestamp"] - previous["Timestamp"]
     dt_next_ms = following["Timestamp"] - current["Timestamp"]
     if not (1 <= dt_prev_ms <= SINGLE_POINT_SPIKE_MAX_DURATION_MS):
@@ -813,7 +837,15 @@ def is_single_point_spike(previous, current, following):
     if not (1 <= dt_next_ms <= SINGLE_POINT_SPIKE_MAX_DURATION_MS):
         return False
 
-    return detour >= previous_to_next * SINGLE_POINT_SPIKE_DETOUR_RATIO
+    dt_total_ms = following["Timestamp"] - previous["Timestamp"]
+    if dt_total_ms <= 0:
+        return False
+    fraction = max(0.0, min(1.0, (current["Timestamp"] - previous["Timestamp"]) / dt_total_ms))
+    expected_lat = previous["Lat"] + (following["Lat"] - previous["Lat"]) * fraction
+    expected_lon = previous["Lon"] + (following["Lon"] - previous["Lon"]) * fraction
+    deviation_m = haversine_m(expected_lat, expected_lon, current["Lat"], current["Lon"])
+    deviation_speed_kmh = (2.0 * deviation_m) / (dt_total_ms / 1000.0) * 3.6
+    return deviation_speed_kmh >= SINGLE_POINT_SPIKE_DEVIATION_SPEED_KMH
 
 
 def remove_transient_detours(rows):
@@ -824,7 +856,7 @@ def remove_transient_detours(rows):
         previous = result[-1]
         current = rows[index]
         following = rows[index + 1]
-        if not is_transient_detour(previous, current, following):
+        if current.get("GpsGapBreak") or not is_transient_detour(previous, current, following):
             result.append(current)
     result.append(rows[-1])
     return result
@@ -934,7 +966,8 @@ def remove_isolated_jump_clusters(rows):
             and 0 <= cluster_duration <= ISOLATED_CLUSTER_MAX_DURATION_MS
         ):
             for keep_index in range(cluster_start, cluster_end + 1):
-                keep[keep_index] = False
+                if not rows[keep_index].get("GpsGapBreak"):
+                    keep[keep_index] = False
             index = end_boundary + 1
         else:
             index += 1
@@ -997,9 +1030,76 @@ def build_gps_points(rows):
             "constantRegionEndLon": row.get("ConstantRegionEndLon"),
             "constantRegionStayLat": row.get("ConstantRegionStayLat"),
             "constantRegionStayLon": row.get("ConstantRegionStayLon"),
+            "gpsGapBreak": row.get("GpsGapBreak", False),
         }
-        for row in rows
+        for row in interpolate_gps_gaps_for_display(mark_gps_freeze_breaks(rows))
     ]
+
+
+def mark_gps_freeze_breaks(rows):
+    if len(rows) < 3:
+        return rows
+    result = [dict(row) for row in rows]
+    index = 0
+    while index < len(result) - 1:
+        start = result[index]
+        end = index + 1
+        while (
+            end < len(result)
+            and haversine_m(start["Lat"], start["Lon"], result[end]["Lat"], result[end]["Lon"])
+            <= GPS_FREEZE_SAME_POINT_RADIUS_M
+        ):
+            end += 1
+
+        last_frozen_index = end - 1
+        recovery_index = end
+        if last_frozen_index > index and recovery_index < len(result):
+            last_frozen = result[last_frozen_index]
+            recovery = result[recovery_index]
+            duration_ms = last_frozen["Timestamp"] - start["Timestamp"]
+            jump_distance_m = haversine_m(last_frozen["Lat"], last_frozen["Lon"], recovery["Lat"], recovery["Lon"])
+            jump_dt_sec = max(1, recovery["Timestamp"] - last_frozen["Timestamp"]) / 1000.0
+            jump_speed_kmh = jump_distance_m / jump_dt_sec * 3.6
+            if (
+                duration_ms >= GPS_FREEZE_MIN_DURATION_MS
+                and jump_distance_m >= GPS_FREEZE_RECOVERY_MIN_JUMP_M
+                and jump_speed_kmh >= GPS_FREEZE_RECOVERY_MIN_SPEED_KMH
+            ):
+                result[recovery_index]["GpsGapBreak"] = True
+        index = max(end, index + 1)
+    return result
+
+
+def interpolate_gps_gaps_for_display(rows):
+    if len(rows) < 2:
+        return rows
+    result = []
+    for index in range(len(rows) - 1):
+        start = rows[index]
+        end = rows[index + 1]
+        result.append(start)
+        gap_ms = end["Timestamp"] - start["Timestamp"]
+        if not (GPS_GAP_INTERPOLATION_MIN_MS <= gap_ms <= GPS_GAP_INTERPOLATION_MAX_MS):
+            continue
+        if start.get("isStayAggregate") or end.get("isStayAggregate") or end.get("GpsGapBreak"):
+            continue
+        ts = start["Timestamp"] + GPS_GAP_INTERPOLATION_INTERVAL_MS
+        while ts < end["Timestamp"]:
+            ratio = (ts - start["Timestamp"]) / gap_ms
+            point = dict(start)
+            point["Timestamp"] = ts
+            point["Lat"] = start["Lat"] + (end["Lat"] - start["Lat"]) * ratio
+            point["Lon"] = start["Lon"] + (end["Lon"] - start["Lon"]) * ratio
+            point["dt"] = datetime.fromtimestamp(ts / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
+            point["StepsDelta"] = 0
+            point["interpolated"] = True
+            point["isStayAggregate"] = False
+            if start.get("DisplayMode") != end.get("DisplayMode") and ratio >= 0.5:
+                point["DisplayMode"] = end.get("DisplayMode")
+            result.append(point)
+            ts += GPS_GAP_INTERPOLATION_INTERVAL_MS
+    result.append(rows[-1])
+    return result
 
 
 def nearest_located_row(located_rows, timestamp_ms: int):
@@ -1022,6 +1122,30 @@ def nearest_located_row(located_rows, timestamp_ms: int):
     if (timestamp_ms - before["Timestamp"]) <= (after["Timestamp"] - timestamp_ms):
         return before
     return after
+
+
+def display_location_at(located_rows, timestamp_ms: int):
+    if not located_rows:
+        return None
+    low = 0
+    high = len(located_rows)
+    while low < high:
+        mid = (low + high) // 2
+        if located_rows[mid]["Timestamp"] < timestamp_ms:
+            low = mid + 1
+        else:
+            high = mid
+    if 0 < low < len(located_rows):
+        before = located_rows[low - 1]
+        after = located_rows[low]
+        gap_ms = after["Timestamp"] - before["Timestamp"]
+        if GPS_GAP_INTERPOLATION_MIN_MS <= gap_ms <= GPS_GAP_INTERPOLATION_MAX_MS:
+            ratio = (timestamp_ms - before["Timestamp"]) / gap_ms
+            return {
+                "Lat": before["Lat"] + (after["Lat"] - before["Lat"]) * ratio,
+                "Lon": before["Lon"] + (after["Lon"] - before["Lon"]) * ratio,
+            }
+    return nearest_located_row(located_rows, timestamp_ms)
 
 
 def parse_constant_region_kind(value):
@@ -1056,35 +1180,20 @@ def build_state_labels(rows, motion_samples):
         return []
     labels = []
     prev_stk = None
-    prev_w = None
     prev_region = None
     for sample in sorted(motion_samples, key=lambda item: item["Timestamp"]):
         stk = (sample.get("KStatus") or "").strip().upper() or None
-        w = (sample.get("WStatus") or "").strip().upper() or None
         region = parse_constant_region_kind(sample.get("ConstantRegionKind"))
         stk_changed = stk is not None and stk != prev_stk
-        w_changed = w is not None and w != prev_w
         region_changed = region != prev_region
-        if stk_changed or w_changed or region_changed:
-            nearest = nearest_located_row(located_rows, sample["Timestamp"])
+        if stk_changed or region_changed:
+            nearest = display_location_at(located_rows, sample["Timestamp"])
             if nearest is not None:
                 lat = nearest.get("Lat")
                 lon = nearest.get("Lon")
                 if lat is not None and lon is not None:
-                    if stk_changed:
-                        label_text = {
-                            "STK1": "K1",
-                            "K1": "K1",
-                            "STK2": "K2",
-                            "K2_K3": "K2",
-                            "STK4": "K4",
-                            "K4": "K4",
-                        }.get(stk)
-                        bg_color = stk_label_color(stk)
-                        if label_text and bg_color:
-                            labels.append({"lat": lat, "lon": lon, "text": label_text, "bgColor": bg_color})
-                    if w_changed and w:
-                        labels.append({"lat": lat, "lon": lon, "text": w, "bgColor": w_label_color(w)})
+                    if stk_changed and stk in ("STK4", "K4"):
+                        labels.append({"lat": lat, "lon": lon, "text": "AC", "bgColor": STATE_LABEL_COLOR_STK4})
                     if region_changed:
                         if region == "STAY":
                             labels.append({"lat": lat, "lon": lon, "text": "STAY", "bgColor": STATE_LABEL_COLOR_STAY})
@@ -1092,8 +1201,6 @@ def build_state_labels(rows, motion_samples):
                             labels.append({"lat": lat, "lon": lon, "text": "CMOV", "bgColor": STATE_LABEL_COLOR_CMOVE})
         if stk is not None:
             prev_stk = stk
-        if w is not None:
-            prev_w = w
         prev_region = region
     return labels
 
@@ -1109,20 +1216,38 @@ def build_trk_labels(rows, motion_samples):
     for sample in sorted(motion_samples, key=lambda item: item["Timestamp"]):
         trk = (sample.get("TrKStatus") or "").strip().upper() or None
         if trk is not None and trk != prev_trk:
-            nearest = nearest_located_row(located_rows, sample["Timestamp"])
+            nearest = display_location_at(located_rows, sample["Timestamp"])
             if nearest is not None:
                 lat = nearest.get("Lat")
                 lon = nearest.get("Lon")
-                if lat is not None and lon is not None:
+                if lat is not None and lon is not None and trk == "ON":
                     labels.append({
                         "lat": lat,
                         "lon": lon,
-                        "text": "tON" if trk == "ON" else "tOFF",
-                        "bgColor": STATE_LABEL_COLOR_TRK_ON if trk == "ON" else STATE_LABEL_COLOR_TRK_OFF,
+                        "timestamp": sample["Timestamp"],
+                        "text": "tON",
+                        "bgColor": STATE_LABEL_COLOR_TRK_ON,
                     })
         if trk is not None:
             prev_trk = trk
-    return labels
+    return dedupe_nearby_labels(labels, min_distance_m=35.0, min_time_ms=20 * 60_000)
+
+
+def dedupe_nearby_labels(labels, min_distance_m: float, min_time_ms: int):
+    kept = []
+    for label in labels:
+        timestamp = label.get("timestamp")
+        duplicate = False
+        for previous in reversed(kept):
+            previous_ts = previous.get("timestamp")
+            if timestamp is not None and previous_ts is not None and abs(timestamp - previous_ts) > min_time_ms:
+                continue
+            if haversine_m(label["lat"], label["lon"], previous["lat"], previous["lon"]) <= min_distance_m:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(label)
+    return kept
 
 
 def summarize_mode_rows(graph_rows, map_rows, graph_point_count):
@@ -1387,18 +1512,38 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
       font-weight: 700;
     }}
     .direction-arrow {{
-      color: rgba(49, 120, 255, 0.92);
-      font-size: 30px;
+      box-sizing: border-box;
+      width: 16px;
+      height: 16px;
+      color: var(--arrow-color, rgba(49, 120, 255, 0.92));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
       font-weight: 800;
       line-height: 1;
       text-shadow:
-        -1px -1px 0 rgba(255,255,255,0.92),
-        1px -1px 0 rgba(255,255,255,0.92),
-        -1px 1px 0 rgba(255,255,255,0.92),
-        1px 1px 0 rgba(255,255,255,0.92);
+        -1px -1px 0 rgba(255,255,255,0.96),
+        1px -1px 0 rgba(255,255,255,0.96),
+        -1px 1px 0 rgba(255,255,255,0.96),
+        1px 1px 0 rgba(255,255,255,0.96);
       transform-origin: center center;
       pointer-events: none;
       user-select: none;
+    }}
+    .map-time-tooltip {{
+      background: rgba(15, 23, 42, 0.92);
+      border: 1px solid rgba(148, 163, 184, 0.55);
+      border-radius: 6px;
+      color: #e5e7eb;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.2;
+      padding: 4px 7px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.32);
+    }}
+    .map-time-tooltip::before {{
+      border-top-color: rgba(15, 23, 42, 0.92);
     }}
     .state-label-stack {{
       pointer-events: none;
@@ -1421,17 +1566,18 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
       border: 1px solid rgba(255,255,255,0.34);
     }}
     .ring-marker {{
-      width: 20px;
-      height: 20px;
+      box-sizing: border-box;
+      width: 12px;
+      height: 12px;
       border-radius: 50%;
       background: #ffffff;
-      box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.32);
     }}
     .ring-marker.start {{
-      border: 3px solid #e53935;
+      border: 2px solid #e53935;
     }}
     .ring-marker.current {{
-      border: 3px solid #3178ff;
+      border: 2px solid #3178ff;
     }}
     .layout {{
       display: grid;
@@ -1842,10 +1988,12 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
     let mapDirectionLayer = L.layerGroup().addTo(map);
     let mapStateLabelLayer = L.layerGroup().addTo(map);
     let mapTrkLabelLayer = L.layerGroup().addTo(map);
+    let mapTimeTooltip = null;
+    const mapTrackStrokeWidthPx = 4.0;
     const directionArrowParams = {{
-      minSpacingPx: 36.0,
-      minSegmentPx: 12.0,
-      startEndSkipPx: 18.0,
+      minSpacingPx: mapTrackStrokeWidthPx * 9.0,
+      minSegmentPx: mapTrackStrokeWidthPx * 3.0,
+      startEndSkipPx: mapTrackStrokeWidthPx * 4.5,
       localBearingWindow: 2
     }};
 
@@ -1878,13 +2026,13 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
       const result = points.map((p, i) => {{
         // Android smoothPolylineTrack に合わせた除外条件:
         //   停止集約点 / VEHICLE モード / 窓内に停止点またはモード違いがある場合はスキップ
-        if (p.isStayAggregate) {{ skipCount++; return p; }}
+        if (p.isStayAggregate || p.gpsGapBreak) {{ skipCount++; return p; }}
         const mode = p.displayMode || 'UNKNOWN';
         if (mode === 'VEHICLE') {{ skipCount++; return p; }}
         for (let off = -windowRadius; off <= windowRadius; off++) {{
           const neighbor = points[i + off];
           if (!neighbor) continue;
-          if (neighbor.isStayAggregate) {{ skipCount++; return p; }}
+          if (neighbor.isStayAggregate || neighbor.gpsGapBreak) {{ skipCount++; return p; }}
           if ((neighbor.displayMode || 'UNKNOWN') !== mode) {{ skipCount++; return p; }}
         }}
         let latSum = 0, lonSum = 0, count = 0;
@@ -1915,6 +2063,14 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
         lat: originLat + y / mpd,
         lon: originLon + x / Math.max(1e-9, mpdLon)
       }};
+    }}
+
+    function formatJstTimestamp(timestampMs) {{
+      if (!Number.isFinite(timestampMs)) return '';
+      const date = new Date(timestampMs);
+      const pad = (value) => String(value).padStart(2, '0');
+      return `${{date.getFullYear()}}-${{pad(date.getMonth() + 1)}}-${{pad(date.getDate())}} `
+        + `${{pad(date.getHours())}}:${{pad(date.getMinutes())}}:${{pad(date.getSeconds())}}`;
     }}
 
     function catmullRomLocal(p0, p1, p2, p3, t, tension) {{
@@ -1958,7 +2114,18 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
             const t = s / (samplesPerSegment + 1);
             const local = catmullRomLocal(p0, p1, p2, p3, t, tension);
             const coord = unprojectFromLocalMeters(local.x, local.y, origin.lat, origin.lon);
-            result.push({{ ...points[i], lat: coord.lat, lon: coord.lon }});
+            const startTs = points[i].timestamp;
+            const endTs = points[i + 1].timestamp;
+            const timestamp = Number.isFinite(startTs) && Number.isFinite(endTs)
+              ? startTs + (endTs - startTs) * t
+              : startTs;
+            result.push({{
+              ...points[i],
+              lat: coord.lat,
+              lon: coord.lon,
+              timestamp,
+              dt: formatJstTimestamp(timestamp)
+            }});
           }}
         }}
         result.push(points[i + 1]);
@@ -2011,8 +2178,28 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
       return (Math.atan2(sinSum, cosSum) * 180.0 / Math.PI + 360.0) % 360.0;
     }}
 
+    function splitPointsForGapBreak(points) {{
+      const chunks = [];
+      let current = [];
+      points.forEach((point) => {{
+        if (point.isStayAggregate || point.gpsGapBreak) {{
+          if (current.length >= 2) chunks.push(current);
+          current = [];
+          if (!point.isStayAggregate) current.push(point);
+        }} else {{
+          current.push(point);
+        }}
+      }});
+      if (current.length >= 2) chunks.push(current);
+      return chunks;
+    }}
+
     function computeDirectionArrowMarkersOnScreen(points) {{
-      if (points.length < 4) {{
+      if (points.some((point) => point.isStayAggregate || point.gpsGapBreak)) {{
+        return splitPointsForGapBreak(points)
+          .flatMap((chunk) => computeDirectionArrowMarkersOnScreen(chunk));
+      }}
+      if (points.length < 2) {{
         return [];
       }}
       const screenPoints = points.map((point) => map.latLngToContainerPoint([point.lat, point.lon]));
@@ -2030,55 +2217,171 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
         return [];
       }}
 
+      function sampleAtDistance(targetDistance) {{
+        const clampedDistance = Math.max(0.0, Math.min(totalDistance, targetDistance));
+        let index = 1;
+        while (index < cumulativeDistances.length && cumulativeDistances[index] < clampedDistance) {{
+          index += 1;
+        }}
+        if (index >= cumulativeDistances.length) {{
+          const lastPoint = points[points.length - 1];
+          const lastScreen = screenPoints[screenPoints.length - 1];
+          return {{
+            x: lastScreen.x,
+            y: lastScreen.y,
+            lat: lastPoint.lat,
+            lon: lastPoint.lon,
+            displayMode: lastPoint.displayMode || 'UNKNOWN'
+          }};
+        }}
+        const segmentStartDistance = cumulativeDistances[index - 1];
+        const segmentEndDistance = cumulativeDistances[index];
+        const segmentDistance = segmentEndDistance - segmentStartDistance;
+        if (segmentDistance <= 1e-6) {{
+          const point = points[index];
+          const screen = screenPoints[index];
+          return {{
+            x: screen.x,
+            y: screen.y,
+            lat: point.lat,
+            lon: point.lon,
+            displayMode: point.displayMode || 'UNKNOWN'
+          }};
+        }}
+        const ratio = (clampedDistance - segmentStartDistance) / segmentDistance;
+        const startScreen = screenPoints[index - 1];
+        const endScreen = screenPoints[index];
+        const startPoint = points[index - 1];
+        const endPoint = points[index];
+        return {{
+          x: startScreen.x + (endScreen.x - startScreen.x) * ratio,
+          y: startScreen.y + (endScreen.y - startScreen.y) * ratio,
+          lat: startPoint.lat + (endPoint.lat - startPoint.lat) * ratio,
+          lon: startPoint.lon + (endPoint.lon - startPoint.lon) * ratio,
+          displayMode: ratio < 0.5 ? (startPoint.displayMode || 'UNKNOWN') : (endPoint.displayMode || 'UNKNOWN')
+        }};
+      }}
+
       const markers = [];
-      let lastPlacedDistance = -directionArrowParams.minSpacingPx;
-      for (let index = 1; index < points.length - 1; index += 1) {{
-        const distanceAlong = cumulativeDistances[index];
-        if (distanceAlong < directionArrowParams.startEndSkipPx) {{
+      const firstDistance = directionArrowParams.startEndSkipPx;
+      const lastDistance = totalDistance - directionArrowParams.startEndSkipPx;
+      for (
+        let distanceAlong = firstDistance;
+        distanceAlong <= lastDistance;
+        distanceAlong += directionArrowParams.minSpacingPx
+      ) {{
+        const center = sampleAtDistance(distanceAlong);
+        const before = sampleAtDistance(distanceAlong - directionArrowParams.minSegmentPx);
+        const after = sampleAtDistance(distanceAlong + directionArrowParams.minSegmentPx);
+        const tangentDistance = Math.hypot(after.x - before.x, after.y - before.y);
+        if (tangentDistance < 3.0) {{
           continue;
         }}
-        if ((totalDistance - distanceAlong) < directionArrowParams.startEndSkipPx) {{
-          continue;
-        }}
-        if ((distanceAlong - lastPlacedDistance) < directionArrowParams.minSpacingPx) {{
-          continue;
-        }}
-
-        const previous = screenPoints[index - 1];
-        const currentPoint = screenPoints[index];
-        const following = screenPoints[index + 1];
-        const beforeDistance = Math.hypot(currentPoint.x - previous.x, currentPoint.y - previous.y);
-        const afterDistance = Math.hypot(following.x - currentPoint.x, following.y - currentPoint.y);
-        if (beforeDistance < directionArrowParams.minSegmentPx || afterDistance < directionArrowParams.minSegmentPx) {{
-          continue;
-        }}
-
-        const localAngles = [];
-        const localStart = Math.max(0, index - directionArrowParams.localBearingWindow);
-        const localEnd = Math.min(points.length - 2, index + directionArrowParams.localBearingWindow);
-        for (let segmentIndex = localStart; segmentIndex <= localEnd; segmentIndex += 1) {{
-          const startPoint = screenPoints[segmentIndex];
-          const endPoint = screenPoints[segmentIndex + 1];
-          const segmentDistance = Math.hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y);
-          if (segmentDistance < directionArrowParams.minSegmentPx) {{
-            continue;
-          }}
-          localAngles.push(Math.atan2(endPoint.y - startPoint.y, endPoint.x - startPoint.x) * 180.0 / Math.PI);
-        }}
-        if (localAngles.length === 0) {{
-          continue;
-        }}
-
-        const meanAngle = circularMeanDegrees(localAngles);
+        const angle = Math.atan2(after.y - before.y, after.x - before.x) * 180.0 / Math.PI;
         markers.push({{
-          lat: points[index].lat,
-          lon: points[index].lon,
-          displayMode: points[index].displayMode || 'UNKNOWN',
-          angle: meanAngle
+          lat: center.lat,
+          lon: center.lon,
+          displayMode: center.displayMode || 'UNKNOWN',
+          angle
         }});
-        lastPlacedDistance = distanceAlong;
       }}
       return markers;
+    }}
+
+    function nearestDisplayPointToContainerPoint(points, containerPoint) {{
+      let bestPoint = null;
+      let bestDistanceSq = Infinity;
+      points.forEach((point) => {{
+        const screenPoint = map.latLngToContainerPoint([point.lat, point.lon]);
+        const dx = screenPoint.x - containerPoint.x;
+        const dy = screenPoint.y - containerPoint.y;
+        const distanceSq = dx * dx + dy * dy;
+        if (distanceSq < bestDistanceSq) {{
+          bestDistanceSq = distanceSq;
+          bestPoint = point;
+        }}
+      }});
+      return bestPoint;
+    }}
+
+    function showMapTimeTooltip(latlng, point) {{
+      const text = point?.dt || formatJstTimestamp(point?.timestamp);
+      if (!text) return;
+      if (!mapTimeTooltip) {{
+        mapTimeTooltip = L.tooltip({{
+          className: 'map-time-tooltip',
+          direction: 'top',
+          offset: [0, -8],
+          opacity: 1.0,
+          permanent: false,
+          sticky: true
+        }});
+      }}
+      mapTimeTooltip
+        .setLatLng(latlng)
+        .setContent(text)
+        .addTo(map);
+    }}
+
+    function hideMapTimeTooltip() {{
+      if (mapTimeTooltip) {{
+        map.closeTooltip(mapTimeTooltip);
+      }}
+    }}
+
+    function attachMapTimeTooltip(polyline, points) {{
+      if (!points || points.length === 0) return;
+      polyline.on('mousemove', (event) => {{
+        const nearest = nearestDisplayPointToContainerPoint(points, event.containerPoint);
+        showMapTimeTooltip(event.latlng, nearest);
+      }});
+      polyline.on('mouseout', hideMapTimeTooltip);
+    }}
+
+    function buildGpsGapBreakSegments(points) {{
+      const segments = [];
+      for (let index = 1; index < points.length; index += 1) {{
+        const recovery = points[index];
+        if (!recovery.gpsGapBreak) continue;
+        let startIndex = index - 1;
+        const frozenAnchor = points[startIndex];
+        while (
+          startIndex > 0 &&
+          !points[startIndex - 1].gpsGapBreak &&
+          haversineMeters(
+            frozenAnchor.lat,
+            frozenAnchor.lon,
+            points[startIndex - 1].lat,
+            points[startIndex - 1].lon
+          ) <= 3.0
+        ) {{
+          startIndex -= 1;
+        }}
+        segments.push({{
+          mode: recovery.displayMode || 'UNKNOWN',
+          points: [points[startIndex], recovery]
+        }});
+      }}
+      return segments;
+    }}
+
+    function linearTooltipPoints(start, end, intervalMs) {{
+      const points = [start];
+      const gapMs = end.timestamp - start.timestamp;
+      if (Number.isFinite(gapMs) && gapMs > intervalMs) {{
+        for (let ts = start.timestamp + intervalMs; ts < end.timestamp; ts += intervalMs) {{
+          const ratio = (ts - start.timestamp) / gapMs;
+          points.push({{
+            ...start,
+            lat: start.lat + (end.lat - start.lat) * ratio,
+            lon: start.lon + (end.lon - start.lon) * ratio,
+            timestamp: ts,
+            dt: formatJstTimestamp(ts)
+          }});
+        }}
+      }}
+      points.push(end);
+      return points;
     }}
 
     function buildModeSegments(points) {{
@@ -2099,9 +2402,13 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
 
       for (let index = 0; index < points.length; index++) {{
         const point = points[index];
-        if (point.isStayAggregate) {{
+        if (point.isStayAggregate || point.gpsGapBreak) {{
           flush();
-          continue; // 滞在点はポリラインに含めない（stop marker として別途描画）
+          if (!point.isStayAggregate) {{
+            currentMode = point.displayMode || 'UNKNOWN';
+            currentSegment = [point];
+          }}
+          continue; // 滞在点はポリラインに含めない。GPS凍結復帰点は新セグメントの始点にする。
         }}
         const pointMode = point.displayMode || 'UNKNOWN';
         if (currentMode === null) {{
@@ -2960,25 +3267,57 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
 
       // モード別ポリライン（Android splineMovingTrack + splitTrackByMode 相当）
       const segments = buildModeSegments(smoothed);
+      const gpsGapSegments = buildGpsGapBreakSegments(smoothed);
       segments.forEach((segment) => {{
         const color = modeColors[segment.mode] || modeColors.UNKNOWN;
-        const weight = segment.mode === 'WALKING' ? 3 : 4;
+        const weight = mapTrackStrokeWidthPx;
         const opacity = segment.mode === 'DEVICE_STILL' ? 0.65 : 0.88;
         const drawPoints = splineSegmentPoints(segment.points, 5);
-        L.polyline(drawPoints.map((p) => [p.lat, p.lon]), {{
+        const latLngs = drawPoints.map((p) => [p.lat, p.lon]);
+        L.polyline(latLngs, {{
           color, weight, opacity
         }}).addTo(mapPolylineLayer);
+        const hitPolyline = L.polyline(latLngs, {{
+          color: '#ffffff',
+          weight: Math.max(18, weight * 4.5),
+          opacity: 0.01,
+          interactive: true
+        }}).addTo(mapPolylineLayer);
+        attachMapTimeTooltip(hitPolyline, drawPoints);
+      }});
+      gpsGapSegments.forEach((segment) => {{
+        const weight = mapTrackStrokeWidthPx;
+        const latLngs = segment.points.map((p) => [p.lat, p.lon]);
+        L.polyline(latLngs, {{
+          color: '#f59e0b',
+          weight: weight * 1.35,
+          opacity: 0.95,
+          dashArray: `${{Math.max(10, weight * 4.0)}} ${{Math.max(7, weight * 2.4)}}`,
+          lineCap: 'butt',
+          lineJoin: 'round',
+          className: 'gps-gap-break-line'
+        }}).addTo(mapPolylineLayer);
+        const hitPolyline = L.polyline(latLngs, {{
+          color: '#ffffff',
+          weight: Math.max(18, weight * 4.5),
+          opacity: 0.01,
+          interactive: true
+        }}).addTo(mapPolylineLayer);
+        attachMapTimeTooltip(
+          hitPolyline,
+          linearTooltipPoints(segment.points[0], segment.points[segment.points.length - 1], 30 * 1000)
+        );
       }});
 
       // 滞在点マーカー（isStayAggregate 点をグレー丸で表示）
       smoothed.forEach((p) => {{
         if (!p.isStayAggregate) return;
         L.circleMarker([p.lat, p.lon], {{
-          radius: 6.5,
+          radius: 3.6,
           color: '#888888',
           fillColor: '#888888',
           fillOpacity: 0.55,
-          weight: 2,
+          weight: 1.2,
           opacity: 0.85
         }}).addTo(mapPolylineLayer);
       }});
@@ -2990,11 +3329,12 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
         L.marker([marker.lat, marker.lon], {{
           interactive: false,
           keyboard: false,
+          zIndexOffset: 500,
           icon: L.divIcon({{
             className: '',
-            html: `<div class="direction-arrow" style="color:${{color}};transform:rotate(${{marker.angle}}deg);">&#x276F;</div>`,
-            iconSize: [44, 44],
-            iconAnchor: [22, 22]
+            html: `<div class="direction-arrow" style="--arrow-color:${{color}};transform:rotate(${{marker.angle}}deg);">&gt;</div>`,
+            iconSize: [16, 16],
+            iconAnchor: [8, 8]
           }})
         }}).addTo(mapDirectionLayer);
       }});
@@ -3005,8 +3345,8 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
         icon: L.divIcon({{
           className: '',
           html: '<div class="ring-marker start"></div>',
-          iconSize: [20, 20],
-          iconAnchor: [10, 10]
+          iconSize: [12, 12],
+          iconAnchor: [6, 6]
         }})
       }}).addTo(map);
 
@@ -3016,8 +3356,8 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
         icon: L.divIcon({{
           className: '',
           html: '<div class="ring-marker current"></div>',
-          iconSize: [20, 20],
-          iconAnchor: [10, 10]
+          iconSize: [12, 12],
+          iconAnchor: [6, 6]
         }})
       }}).addTo(map);
 

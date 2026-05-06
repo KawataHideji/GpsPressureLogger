@@ -11,6 +11,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.util.Log
 import android.widget.RemoteViews
@@ -325,6 +326,7 @@ class MapWidgetReceiver : AppWidgetProvider() {
             if (entries.isNotEmpty()) {
                 val polylineTrack = GpsUtil.buildDisplayPolyline(entries, motionSamples)
                 val polylineSegments = GpsUtil.splitTrackByMode(polylineTrack)
+                val gpsGapSegments = GpsUtil.buildGpsGapBreakSegments(polylineTrack)
                 val directionMarkers = GpsUtil.computeDirectionArrowMarkersOnScreen(
                     track = polylineTrack,
                     projectToScreen = { point -> toCanvas(point.lat, point.lon) },
@@ -346,6 +348,26 @@ class MapWidgetReceiver : AppWidgetProvider() {
                     }
                     linePaint.color = GpsUtil.modeColor(segment.displayMode)
                     canvas.drawPath(path, linePaint)
+                }
+                gpsGapSegments.forEach { segment ->
+                    val path = android.graphics.Path()
+                    segment.points.forEachIndexed { index, pt ->
+                        val (x, y) = toCanvas(pt.lat, pt.lon)
+                        if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                    }
+                    val originalStrokeWidth = linePaint.strokeWidth
+                    val originalStrokeCap = linePaint.strokeCap
+                    linePaint.color = Color.rgb(245, 158, 11)
+                    linePaint.strokeWidth = originalStrokeWidth * 1.35f
+                    linePaint.strokeCap = Paint.Cap.BUTT
+                    linePaint.pathEffect = DashPathEffect(
+                        floatArrayOf(originalStrokeWidth * 4.0f, originalStrokeWidth * 2.4f),
+                        0f
+                    )
+                    canvas.drawPath(path, linePaint)
+                    linePaint.pathEffect = null
+                    linePaint.strokeWidth = originalStrokeWidth
+                    linePaint.strokeCap = originalStrokeCap
                 }
 
                 val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

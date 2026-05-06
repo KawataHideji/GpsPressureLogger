@@ -125,6 +125,12 @@ class LoggingService : Service(), SensorEventListener {
     private var burstBestLocation: android.location.Location? = null
     private var burstCandidateCount: Int = 0
     private var previousGpsAggregationMode = GpsAggregationMode.UNKNOWN
+    private var lastPressureRecordMs: Long = 0L
+    private var lastLoggedStKStatus: StKStatus? = null
+    private var lastLoggedTrKStatus: TrKStatus? = null
+    private var lastLoggedWStatus: String? = null
+    private var lastLoggedConfirmedMode: Mode? = null
+    private var lastLoggedConstantRegionKind: ConstantRegionKind? = null
 
     private lateinit var db: AppDatabase
     private lateinit var settings: SettingsRepository
@@ -332,6 +338,7 @@ class LoggingService : Service(), SensorEventListener {
             val stepDelta = motionStateManager.consumeStepDeltaForSlot()
             stepDelta to motionStateManager.updateBaseCycle(slotTimestamp)
         }
+        val previousLoggedStKStatus = lastLoggedStKStatus
         persistMotionSample(slotTimestamp, motionSnapshot, stepDeltaRaw)
 
         val previousMode = currentGpsMode
@@ -358,6 +365,19 @@ class LoggingService : Service(), SensorEventListener {
                 "GPS_INTERVAL_CHANGED: mode=${motionSnapshot.finalMode} intervalSec=${currentGpsRequestIntervalMs / 1000.0} " +
                     "stK=${motionSnapshot.stK.status} w=${motionSnapshot.wStatus.status} " +
                     "avg=$avgText ratio=$ratioText scalar=$scalarText var=$varText accelSource=${motionSnapshot.stK.source}"
+            )
+        }
+        if (previousLoggedStKStatus != StKStatus.STK4 && motionSnapshot.stK.status == StKStatus.STK4) {
+            val params = motionStateParamsProvider.current()
+            val stKAvgText = motionSnapshot.stK.avg?.let { String.format("%.3f", it) } ?: "null"
+            val stKRatioText = motionSnapshot.stK.directionalityRatio?.let { String.format("%.3f", it) } ?: "null"
+            val trKAvgText = motionSnapshot.trK.avg?.let { String.format("%.3f", it) } ?: "null"
+            val trKRatioText = motionSnapshot.trK.directionalityRatio?.let { String.format("%.3f", it) } ?: "null"
+            ExportUtil.writeDebugLog(
+                this,
+                "AC_EVENT: ts=$slotTimestamp StKAvg=$stKAvgText StKRatio=$stKRatioText " +
+                    "StKAvgThreshold=${params.stK4AvgThreshold} StKRatioThreshold=${params.stK4RatioThreshold} " +
+                    "TrKAvg=$trKAvgText TrKRatio=$trKRatioText"
             )
         }
 
@@ -470,7 +490,9 @@ class LoggingService : Service(), SensorEventListener {
         ExportUtil.writeDebugLog(
             this,
             "TRK_GPS_IMMEDIATE: ts=${snapshot.timestampMs} intervalSec=${params.gpsKMinMs / 1000.0} " +
-                "trK=${snapshot.status} avg=$avgText ratio=$ratioText accelSource=${snapshot.source}"
+                "trK=${snapshot.status} TrKAvg=$avgText TrKRatio=$ratioText " +
+                "TrKAvgThreshold=${params.trKAvgThreshold} TrKRatioThreshold=${params.trKRatioThreshold} " +
+                "accelSource=${snapshot.source}"
         )
     }
 
@@ -680,9 +702,33 @@ class LoggingService : Service(), SensorEventListener {
         stepDelta3s: Int?
     ) {
         val sample = buildMotionSample(slotTimestamp, snapshot, stepDelta3s)
-        db.motionSampleDao().insertReplace(sample)
-        ExportUtil.enqueueMotionSampleToLocalCsv(this, sample)
+        if (shouldPersistMotionEvent(snapshot)) {
+            db.motionSampleDao().insertReplace(sample)
+            ExportUtil.enqueueMotionSampleToLocalCsv(this, sample)
+            updateLastLoggedMotionState(snapshot)
+        }
         finalizeCompletedConstantRegion(snapshot.completedRegion)
+    }
+
+    private fun shouldPersistMotionEvent(snapshot: MotionStateSnapshot): Boolean {
+        val region = snapshot.completedRegion ?: snapshot.activeRegionEstimate
+        val regionKind = region?.kind?.takeUnless { it == ConstantRegionKind.NONE }
+        val confirmedMode = snapshot.finalMode.takeIf { snapshot.finalModeConfirmed }
+        return lastLoggedStKStatus == null ||
+            snapshot.stK.status != lastLoggedStKStatus ||
+            snapshot.trK.status != lastLoggedTrKStatus ||
+            snapshot.wStatus.status.name != lastLoggedWStatus ||
+            confirmedMode != lastLoggedConfirmedMode ||
+            regionKind != lastLoggedConstantRegionKind
+    }
+
+    private fun updateLastLoggedMotionState(snapshot: MotionStateSnapshot) {
+        val region = snapshot.completedRegion ?: snapshot.activeRegionEstimate
+        lastLoggedStKStatus = snapshot.stK.status
+        lastLoggedTrKStatus = snapshot.trK.status
+        lastLoggedWStatus = snapshot.wStatus.status.name
+        lastLoggedConfirmedMode = snapshot.finalMode.takeIf { snapshot.finalModeConfirmed }
+        lastLoggedConstantRegionKind = region?.kind?.takeUnless { it == ConstantRegionKind.NONE }
     }
 
     private fun buildMotionSample(
@@ -708,9 +754,17 @@ class LoggingService : Service(), SensorEventListener {
             timestamp = slotTimestamp,
             stepDelta3s = normalizedStepDelta,
             kStatus = snapshot.stK.status.name,
+            kRawStatus = snapshot.stK.rawStatus.name,
+            kAvg = snapshot.stK.avg,
+            kDirectionalityRatio = snapshot.stK.directionalityRatio,
             trKStatus = snapshot.trK.status.name,
+            trKRawStatus = snapshot.trK.rawStatus.name,
+            trKAvg = snapshot.trK.avg,
+            trKDirectionalityRatio = snapshot.trK.directionalityRatio,
             wStatus = snapshot.wStatus.status.name,
             stepDeltaWindow = snapshot.wStatus.stepDeltaWindow,
+            gpsIntervalMs = snapshot.gpsSampling.intervalMs,
+            gpsImmediate = snapshot.gpsSampling.immediate,
             confirmedMode = if (snapshot.finalModeConfirmed) snapshot.finalMode.name else null,
             constantRegionKind = region?.kind?.name,
             constantRegionSpeedKmh = region?.averageSpeedKmh,
@@ -777,6 +831,26 @@ class LoggingService : Service(), SensorEventListener {
     private suspend fun finalizeCompletedConstantRegion(region: ConstantRegionResult?) {
         if (region == null || region.kind == ConstantRegionKind.NONE) return
         if (region.endTimestampMs <= region.startTimestampMs) return
+
+        val regionStartSample = MotionSample(
+            timestamp = region.startTimestampMs,
+            confirmedMode = when (region.kind) {
+                ConstantRegionKind.CONSTANT_MOVE -> Mode.VEHICLE.name
+                ConstantRegionKind.STAY -> Mode.STOPPED.name
+                ConstantRegionKind.NONE -> null
+            },
+            constantRegionKind = region.kind.name,
+            constantRegionSpeedKmh = region.averageSpeedKmh,
+            constantRegionStartLat = region.startPoint?.latitude,
+            constantRegionStartLon = region.startPoint?.longitude,
+            constantRegionEndLat = region.endPoint?.latitude,
+            constantRegionEndLon = region.endPoint?.longitude,
+            constantRegionStayLat = region.stayPoint?.latitude,
+            constantRegionStayLon = region.stayPoint?.longitude,
+            constantRegionDirectionDeg = region.directionDeg
+        )
+        db.motionSampleDao().insertReplace(regionStartSample)
+        ExportUtil.enqueueMotionSampleToLocalCsv(this, regionStartSample)
 
         val samples = db.motionSampleDao().getBetweenOnce(
             fromTs = region.startTimestampMs,
@@ -902,7 +976,13 @@ class LoggingService : Service(), SensorEventListener {
         gpsAggregationMode: GpsAggregationMode,
         stepDelta: Int
     ): LogEntry {
-        val pressure = lastPressure
+        val shouldRecordPressure = lastPressure != null &&
+            (lastPressureRecordMs == 0L ||
+                slotTimestamp - lastPressureRecordMs >= LoggingConfig.PRESSURE_RECORD_INTERVAL_MS)
+        val pressure = if (shouldRecordPressure) lastPressure else null
+        if (shouldRecordPressure) {
+            lastPressureRecordMs = slotTimestamp
+        }
         val aggregatedGps = aggregateGpsForSlot(slotTimestamp, gpsAggregationMode)
         val altitude = aggregatedGps?.altitude
         val qnh = if (pressure != null && altitude != null) {

@@ -141,17 +141,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun exportMotionSamplesToUri(fileUri: Uri) = viewModelScope.launch {
-        Toast.makeText(getApplication(), "補助ログのエクスポートを開始します...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(getApplication(), "状態イベントログのエクスポートを開始します...", Toast.LENGTH_SHORT).show()
         val success = withContext(Dispatchers.IO) {
             ExportUtil.writeLocalDebugLog(getApplication(), "EXPORT_MOTION_STARTED uri=$fileUri")
             try {
-                val allSamples = db.motionSampleDao().getSinceOnce(0L)
+                val sampleCount = db.motionSampleDao().countSince(0L)
                 ExportUtil.writeLocalDebugLog(
                     getApplication(),
-                    "EXPORT_MOTION_REQUESTED uri=$fileUri rows=${allSamples.size}"
+                    "EXPORT_MOTION_REQUESTED uri=$fileUri rows=$sampleCount"
                 )
-                ExportUtil.writeMotionSamplesToUri(getApplication(), fileUri, allSamples)
-            } catch (e: Exception) {
+                ExportUtil.writeMotionSamplesToUriPaged(getApplication(), fileUri, db)
+            } catch (e: Throwable) {
                 ExportUtil.writeLocalDebugLog(
                     getApplication(),
                     "EXPORT_MOTION_FAILED uri=$fileUri reason=query:${e.javaClass.simpleName}:${e.message ?: "unknown"}"
@@ -160,9 +160,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             }
         }
         if (success) {
-            Toast.makeText(getApplication(), "補助ログのエクスポートが完了しました", Toast.LENGTH_SHORT).show()
+            Toast.makeText(getApplication(), "状態イベントログのエクスポートが完了しました", Toast.LENGTH_SHORT).show()
         } else {
-            Toast.makeText(getApplication(), "補助ログのエクスポートに失敗しました", Toast.LENGTH_SHORT).show()
+            Toast.makeText(getApplication(), "状態イベントログのエクスポートに失敗しました", Toast.LENGTH_SHORT).show()
         }
     }
 

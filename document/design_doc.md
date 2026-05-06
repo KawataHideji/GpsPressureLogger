@@ -12,7 +12,7 @@
   - `MotionStateManager` が算出した `StepsDelta` と状態スナップショットを使って 1 レコードを組み立てる。
   - `trK`（加速度トリガー）が ON へ確定遷移した通知を受けた場合は、3 秒 base cycle を待たずに 1 回目の GPS 即時取得を行い、通常 GPS 更新も `gpsKMinMs` 周期へ張り替える。
   - DB 保存後にローカル CSV へ追記し、必要に応じてウィジェット更新を行う。
-  - 3 秒ごとにモード判定前の補助指標も生成し、主記録とは別系統で保持する。
+  - 3 秒ごとにモード判定前の補助指標を生成するが、永続化は状態変化点を中心に行い、主記録とは別系統で保持する。
   - 調査用に `onStartCommand()` 到達ログと、サービス開始後の初回記録成功ログを出す。
   - 停止中に新しい GPS コールバックが来ない場合でも、`lastLocation` / `getCurrentLocation()` を使った bootstrap と直近有効 GPS の再利用で、再起動直後や 03:00 境界直後の GPS 固着を避ける。
   - ウィジェット周期は `LoggingService` が唯一の時間管理者として扱い、サービス起動直後または設定値変更直後は即時に 1 回描画し、その後は `slotTimestamp + interval` を次回予定時刻にする。
@@ -27,11 +27,11 @@
   - `timestamp` を一意キーとし、各観測列は nullable とする。
 - `MotionSample`
   - モード判定用の補助指標と、新方式の確定状態 1 行を表す entity。
-  - `timestamp` を一意キーとし、旧互換の `AccelStddev3s` / `AccelMad3s` に加えて、`KStatus`、`KAvg`、`KScalarAvg`、`KVariance`、`TrKStatus`、`TrKAvg`、`WStatus`、`GpsIntervalMs`、`ConfirmedMode` を保持する。列名は互換性のため `KStatus` のままだが、現行値は 3 秒スロット状態 `stK` (`STK1 / STK2 / STK4`) として扱う。DB には旧分析列が残るが、外部バックアップ CSV は現行判定で使う項目だけを出力する。
+  - `timestamp` を一意キーとし、旧互換の `AccelStddev3s` / `AccelMad3s` に加えて、`KStatus`、`StKAvg`、`StKRatio`、`TrKStatus`、`TrKAvg`、`TrKRatio`、`WStatus`、`GpsIntervalMs`、`ConfirmedMode` を保持する。Room のフィールド名は互換性のため `kAvg / kDirectionalityRatio / trKDirectionalityRatio` を維持するが、外部 CSV では `StKAvg / StKRatio / TrKRatio` として出力する。
 - `LogDao`
   - 単件保存、バッチ保存、`timestamp` 単位の検索、期間取得を担当する。
 - `MotionSampleDao`
-  - 3 秒ごとの補助指標保存、期間取得、import / export 用の取得を担当する。
+  - 状態変化点の保存、期間取得、import / export 用の取得を担当する。旧 3 秒サンプル形式も import / viewer 互換として扱う。
 - `AppDatabase`
   - Room DB の生成を担う。
   - 主記録と補助指標の両方を保持する。
@@ -53,7 +53,7 @@
   - 日次ログファイル名は `GpsUtil.getLoggingStart()` を使って 03:00 区切りで決める。
   - `writeDebugLog()` の重要イベントは、debug テキストログに加えて日次 CSV に `# EVENT <timestamp> ...` 形式で追記する。
   - `writeEntriesToUri()` は日次 CSV に残っている `# EVENT` コメントを時系列順に手動バックアップ CSV へも反映する。
-  - 補助センサー判定ログは `motion_metrics_yyyyMMdd.csv` として主記録とは別に追記する。
+  - 状態イベントログは `motion_events_yyyyMMdd.csv` として主記録とは別に追記する。旧 `motion_metrics_yyyyMMdd.csv` は互換入力として残す。
   - 手動 export は `openOutputStream()` の成否だけで成功扱いせず、close 後に出力先ドキュメントサイズが 0 byte でないことまで確認する。0 byte の場合は失敗扱いとし、可能ならその場で削除する。
   - 起動時の歩数補完では、旧形式 `Steps` と新形式 `StepsDelta` の両方をローカル CSV から読み取って DB へ反映する。
   - `writeDebugLog()` はローカル debug ログへ追記し、設定が有効なら選択済みログファイル URI にも非同期追記する。
@@ -157,11 +157,12 @@
 - viewer は `停止偏差` グラフを持ち、停止区間中心からの raw 偏差と、各点の補正量 (`raw -> corrected` の移動距離) を比較できる。
   - viewer の `停止偏差` グラフは、全期間表示に加えて大きな偏差ピーク周辺へフォーカスできる。
 - viewer の地図は `地図時間` で `全日 / 偏差フォーカス連動` を切り替えられ、偏差フォーカスで選んだ時刻帯だけの軌跡を確認できる。
-- viewer の地図は `K/W` ラベル層と `trK` ラベル層を個別に ON/OFF できる。補助ログバックアップ CSV がある場合は `MotionSample` の `KStatus / WStatus / ConstantRegionKind / TrKStatus` を使って Android と同じ変化点ラベルを再構成する。
+- viewer の地図は状態イベントラベル層と `trK` ラベル層を個別に ON/OFF できる。状態イベントログまたは旧補助ログバックアップ CSV がある場合は `MotionSample` の `KStatus / WStatus / ConstantRegionKind / TrKStatus` を使って Android と同じ変化点ラベルを再構成する。表示ラベルは `AC`（STK4 enter）、`STAY`、`CMOV`、`tON` のみとする。
+- viewer の地図軌跡には表示線と同じ座標列で透明な hit 用 polyline を重ね、mousemove 時に画面距離で最も近い表示点を探して日時 tooltip を出す。スプライン補間点は前後 GPS 点の時刻を線形補間した `timestamp / dt` を持つ。
 - viewer / Android の地図には、直線区間だけでなく曲線区間にも `>` 風の進行方向マーカーを差し込み、長い移動区間の向きを読み取りやすくする。
-- 進行方向マーカーは、始点・終点付近を避け、前後数点の局所接線方向で固定サイズ描画する。
+- 進行方向マーカーは、始点・終点付近を避け、画面上の折れ線距離に沿って一定間隔でサンプリングする。角度はサンプル位置の前後を同じ screen px 距離だけ離した点から接線方向として求める。配置間隔は線幅の 9 倍、接線計算距離は線幅の 3 倍、始終端スキップ距離は線幅の 4.5 倍を基本にし、元 GPS 点の頂点位置には依存しない。
 - 進行方向マーカーの回転角は、GPS 方位角（北=0度, 時計回り）を `>` 文字の基準向き（右向き=0度）へ合わせるため `bearing - 90度` を使う。
-- 進行方向マーカーの色は折れ線と同じモード色を使う。
+- 進行方向マーカーは、丸背景を使わず、モード色の `>` 文字に白い縁取りを付けて表示する。Android アプリ、地図ウィジェット、Windows viewer で同じ描画イメージへ揃える。
 - 進行方向マーカーの密度は控えめにし、既定では長い移動区間でもおよそ従来の 1/3 程度の数に抑える。
 - viewer は補助ログバックアップ CSV が無い場合に `# EVENT` から `DisplayMode` / `K/W` / `trK` を推測再構成しない。Android アプリと同じく、補助ログが無い場合はこれらの状態ラベルと mode 由来表示は欠損として扱う。
 - viewer の停止標準化前段では、`stepsDelta=0` かつ `displayMode != VEHICLE` の GPS 点列に対して、`return burst` も検知する。これは大ジャンプ後に数点から数十点で元クラスタ近傍へ戻る短時間バーストで、戻り判定距離は `90m` を初期値とする。
@@ -236,6 +237,7 @@
 - `MapViewModel`
   - 03:00 区切り日単位の地図表示データを `GpsUtil.prepareMapEntries()` で共通前処理して作る。
   - 同日の `MotionSample` を合わせて読み、`GpsUtil.normalizeStopsForDisplay(entries, motionSamples)` を通した表示用系列を `entries` として提供する。
+  - 地図画面は `Flow` による全日分ログのライブ監視を行わず、対象日を選んだ時に `getEntriesBetweenAscOnce()` / `getBetweenOnce()` で one-shot 読み込みする。記録中の 3 秒 insert で地図 overlay を再作成しない。
   - 前日 / 翌日移動では、位置データが存在する日だけへ遷移する。
 - `MapScreen`
   - 地図 overlay の再描画時に、同一日では自動ズームし直さない。
@@ -245,7 +247,8 @@
   - 折れ線幅は `GpsUtil.mapTrackStrokeWidthPx()` で取得し、density を掛けた dp 基準で描く。初回 auto-fit が必要な場合は、地図を fit / zoom してから overlay を追加する。
   - 折れ線色は `displayMode` に応じて `黒 / グレー / 青 / 赤` を使い、旧グラデーションは使わない。
   - 進行方向マーカーは `GpsUtil.computeDirectionArrowMarkersOnScreen()` の結果を使って `>` を描き、縮尺変更で密度が増えすぎないようにする。
-  - Android 側の `>` 進行方向マーカーは、折れ線色の文字に白い縁取りを付けて地図上で見失いにくくする。
+  - Android アプリ本体の `>` 進行方向マーカーは、個別 `Marker` の bitmap icon として描く。表示イメージは折れ線色の `>` 文字に白い縁取りを付けたものとし、丸背景は使わない。
+  - Android アプリ本体の地図も `GpsUtil.buildDisplayPolyline()` の標準補間点列を使う。地図操作時の重さ対策は `MapViewModel` の one-shot 読み込みと overlay 再作成抑制で行い、`>` の描画イメージや点列密度は変えない。
   - マーカーサイズは widget と同じ共通規則を使い、`MarkerSurface.APP_MAP` の倍率で体感サイズを揃える。
   - marker icon の `BitmapDrawable` は `Resources` 付きで生成し、density 差による見え方のズレを防ぐ。
   - 現在点マーカーは `isHollow = true` を使い、白地に青リングの見え方で開始点と対になるように描く。
@@ -285,8 +288,8 @@
 3. `LogDao.insertReplace()` で DB に即時保存する。
 4. 同じ `LogEntry` をファイル書き出し用キューへ enqueue する。
 5. キュー件数が閾値に達した時、または強制フラッシュ契機で、日次 CSV へまとめ書きする。
-6. 同じ 3 秒ループで `MotionSample` を生成する。
-7. `MotionSampleDao` で DB に即時保存し、補助ログ CSV 用キューへ enqueue する。
+6. 同じ 3 秒ループで `MotionSample` 相当の状態点を生成する。
+7. `KStatus / TrKStatus / WStatus / ConfirmedMode / ConstantRegionKind` のいずれかが変化した場合だけ `MotionSampleDao` で DB に保存し、状態イベントログ CSV 用キューへ enqueue する。表示側は保存済み状態点を前方補完する。
    - `MotionSample` の保存内容は `LoggingConfig.MOTION_LOG_ROUTINE` で切り替える。既定は `NORMAL` とし、表示維持に必要な最小列だけを保存する。`FULL` に切り替えると、解析用の全列を従来どおり保存する。
 8. 起動時の旧歩数修復は `SettingsRepository.stepRepairVersion` を見て一度だけ実行する。
 9. 停止中に GPS プールが空でも、直近有効 GPS がまだ新しければ、その値をスロット時刻へ延長して使う。
@@ -319,7 +322,7 @@
 - `LoggingService` は `TYPE_LINEAR_ACCELERATION` と姿勢系センサーを `MotionStateManager` へ投入し、`WorldAccelerationTransformer` が可能な限り世界座標へ変換する。`TYPE_ROTATION_VECTOR` を優先し、未対応時は `TYPE_ACCELEROMETER + TYPE_MAGNETIC_FIELD`、それも不可なら端末座標またはノルム fallback を使う。
 - `TrKDetector` は変換済みの重力除去済み 3 軸加速度を受け取り、直近 `trKWindowMs` の 3 軸ベクトル平均ノルム `TrKAvg` を計算する。`TrKAvg >= trKAvgThreshold` なら `trK=ON`、未満なら `trK=OFF` とする。
 - `trK` は毎センサーイベントで再評価し、`OFF -> ON` 遷移した瞬間だけ、3 秒 base cycle を待たず GPS を 1 回即時取得する。
-- `trK=ON` 確定時の即時GPSは、単発 `CurrentLocationRequest` ではなく短時間の burst `requestLocationUpdates()` で行う。burst は `PRIORITY_HIGH_ACCURACY`、`interval=500ms`、`minInterval=100ms`、`maxUpdateAge=500ms`、`duration=10000ms`、`maxUpdates=10` とし、`accuracy <= 30m` の候補を即採用、良点が来なければ最良候補が `accuracy <= 80m` の場合だけ採用する。通常の `requestLocationUpdates()` も同時に `gpsKMinMs` 周期へ張り替え、burst の開始・候補・採用・棄却を debug event に残して次回解析できるようにする。`MotionSample` には 3 秒ごとに、その時点の `TrKStatus / TrKAvg` も保存する。
+- `trK=ON` 確定時の即時GPSは、単発 `CurrentLocationRequest` ではなく短時間の burst `requestLocationUpdates()` で行う。burst は `PRIORITY_HIGH_ACCURACY`、`interval=500ms`、`minInterval=100ms`、`maxUpdateAge=500ms`、`duration=10000ms`、`maxUpdates=10` とし、`accuracy <= 30m` の候補を即採用、良点が来なければ最良候補が `accuracy <= 80m` の場合だけ採用する。通常の `requestLocationUpdates()` も同時に `gpsKMinMs` 周期へ張り替え、burst の開始・候補・採用・棄却を debug event に残して次回解析できるようにする。状態イベントには `TrKStatus / TrKAvg / TrKRatio` を保存する。`TrKRatio` は算出不能時に null を許容する。
 - `StKSlotClassifier` は前回 base cycle から今回 base cycle までの変換済み加速度列全体を消費し、3 軸ベクトル平均ノルムを `KAvg`、スカラー平均を `KScalarAvg`、合成加速度ノルムの分散を `KVariance` として計算する。
 - `stK` は `KAvg >= stK4AvgThreshold` なら `STK4`、それ以外で `KScalarAvg >= stK2ScalarAvgThreshold` または `KVariance >= stK2VarianceThreshold` なら `STK2`、どちらでもなければ `STK1` とする。現行の外部 CSV は `KStatus / KRawStatus / KAvg / KScalarAvg / KVariance / TrKStatus / TrKRawStatus / TrKAvg` を中心に出力する。
 - `StepManager` は `TYPE_STEP_DETECTOR` が使える端末では detector イベントだけの最終発生時刻と event window を保持する。直近 `wWindowMs` 内の歩行イベント数が `wStepDeltaThreshold` 以上、かつ判定時刻と最終歩行イベントとの差が `walkingThresholdMs` 以内なら `W1`、それ以外は `W2` とする。`TYPE_STEP_COUNTER` は保存歩数用であり、detector が使える端末では `W1 / W2` 判定窓へ混ぜない。detector が無い端末だけ counter 増分を歩行イベントの fallback として使う。
@@ -395,7 +398,7 @@
 記録・フラッシュ方針:
 
 - GPS / 気圧 / 歩数の取得周期と、DB / CSV への永続化周期は分離する。
-- 主記録レコードと `motion_samples` レコードの論理生成周期は 3 秒を基準とする。
+- 主記録レコードの論理生成周期は 3 秒を基準とする。`motion_samples` は状態イベントログとして変化点を中心に保存する。
 - 生成済みレコードはメモリバッファへ積み、日次 CSV などファイル系ストアへのフラッシュは既定 5 分ごとにまとめて行う。
 - 既定の flush 閾値は 100 件で、3 秒主記録 기준ではおよそ 5 分相当になる。
 - GPS は各 3 秒スロットごとに一度だけ主記録へ集約し、GPS / 高度の欠損を許容する。
@@ -411,7 +414,7 @@
   - いずれもスロット内プール 0 件なら欠損
 - 停止（`STOPPED`）の GPS 集約規則は、完全停止寄りの平均化ルールを使う。
 - 実装上は、`STOPPED` で直前も `STOPPED` または `DEVICE_STILL` の場合に `before` を含める。
-- 気圧は 3 秒スロット時点の最新保持値を採用し、まだセンサー値を一度も受けていない場合のみ欠損とする。
+- 気圧は 3 分ごとの記録スロットで最新保持値を採用し、それ以外の主記録行では欠損とする。表示値とグラフ系列は直近有効値・補間処理で復元する。
 - 歩数は 3 秒区間の増分を採用し、初期基準未確定時は `0` で開始してよい。
 - 強制フラッシュ契機は少なくとも次を含む。
   - 手動 export 開始前
@@ -438,7 +441,8 @@
 
 ### 3.5 地図前処理
 - `GpsUtil.prepareMapEntries()` が 03:00 区切り日の範囲抽出、位置付きレコードへの限定、時系列ソート、GPS 外れ値除去を一括で行う。
-- GPS 外れ値除去は、精度閾値、前点からの速度閾値、前後 3 点比較による単発ジャンプ除去を組み合わせる。
+- GPS 外れ値除去は、精度閾値、前点からの速度閾値、前後 3 点比較による単発ジャンプ除去を組み合わせる。単発ジャンプ除去では、前後点 `A/C` の時刻補間位置 `P` と中央点 `B` の偏差距離から `2 * distance(P, B) / (time(C)-time(A))` を求め、`100km/h` 以上なら `B` を除外する。
+- 表示用 GPS 系列では、同一座標付近の長時間凍結後に不可能な復帰ジャンプが出た場合、復帰点へ `gpsGapBreak` / `isGapBreak` を付ける。Android の `GpsUtil.buildDisplayPolyline()` と viewer の `build_gps_points()` はこの点をセグメント境界として扱い、平準化・スプライン・進行方向マーカーの計算をこの境界で分離する。`GpsUtil.buildGpsGapBreakSegments()` / viewer の `buildGpsGapBreakSegments()` は凍結開始座標から復帰点までをオレンジ色破線の経路不明区間として別描画する。
 - 高速移動中の横飛び点には、前後点を結ぶ線分からの横ずれ距離、余分な迂回距離、折れ角を用いた transient detour フィルタを適用する。
 - さらに、短時間だけ別地点群へ飛んで戻るケースには、両端の大ジャンプで囲まれた短時間・少数点クラスタをまとめて除去する。
 - 本体地図と地図ウィジェットは同じ前処理結果を使う。

@@ -7,12 +7,15 @@ import com.example.gpspressurelogger.data.AppDatabase
 import com.example.gpspressurelogger.data.LogEntry
 import com.example.gpspressurelogger.data.MotionSample
 import com.example.gpspressurelogger.util.GpsUtil
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -28,16 +31,17 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     private val preparedEntries = _targetDateStart
         .flatMapLatest { start ->
-            db.logDao().getEntriesSince(start)
-        }
-        .map { raw ->
-            val start = _targetDateStart.value
-            GpsUtil.prepareMapEntries(raw, start)
+            flow {
+                val raw = db.logDao().getEntriesBetweenAscOnce(start, start + GpsUtil.DAY_MS)
+                emit(GpsUtil.prepareMapEntries(raw, start))
+            }.flowOn(Dispatchers.Default)
         }
 
     val motionSamples: StateFlow<List<MotionSample>> = _targetDateStart
         .flatMapLatest { start ->
-            db.motionSampleDao().getBetween(start, start + GpsUtil.DAY_MS - 1)
+            flow {
+                emit(db.motionSampleDao().getBetweenOnce(start, start + GpsUtil.DAY_MS))
+            }.flowOn(Dispatchers.Default)
         }
         .map { samples -> samples.sortedBy { it.timestamp } }
         .stateIn(
@@ -57,6 +61,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
             GpsUtil.normalizeStopsForDisplay(mapEntries, samples)
         }
     }
+        .flowOn(Dispatchers.Default)
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),

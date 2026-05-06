@@ -12,6 +12,7 @@ object LoggingConfig {
 
     const val SLOT_INTERVAL_MS = 3_000L
     const val SLOT_INTERVAL_SECONDS = SLOT_INTERVAL_MS / 1000f
+    const val PRESSURE_RECORD_INTERVAL_MS = 3 * 60_000L
 
     /**
      * MotionSample の保存内容を切り替える。

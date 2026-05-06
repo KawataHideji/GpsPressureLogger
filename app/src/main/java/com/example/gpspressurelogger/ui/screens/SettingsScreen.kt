@@ -255,7 +255,7 @@ fun SettingsScreen(
                         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                             addCategory(Intent.CATEGORY_OPENABLE)
                             type = "text/csv"
-                            putExtra(Intent.EXTRA_TITLE, "gps_pressure_motion_metrics_backup_$timeStr.csv")
+                            putExtra(Intent.EXTRA_TITLE, "gps_pressure_motion_events_backup_$timeStr.csv")
                             putExtra("android.content.extra.SHOW_ADVANCED", true)
                             putExtra(Intent.EXTRA_LOCAL_ONLY, false)
                         }
@@ -264,7 +264,7 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                 ) {
-                    Text("補助センサー判定ログを保存")
+                    Text("状態イベントログを保存")
                 }
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))

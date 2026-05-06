@@ -24,6 +24,12 @@ interface MotionSampleDao {
     @Query("SELECT * FROM motion_samples WHERE timestamp >= :since ORDER BY timestamp DESC")
     suspend fun getSinceOnce(since: Long): List<MotionSample>
 
+    @Query("SELECT COUNT(*) FROM motion_samples WHERE timestamp >= :since")
+    suspend fun countSince(since: Long): Int
+
+    @Query("SELECT * FROM motion_samples WHERE timestamp > :afterTimestamp ORDER BY timestamp ASC LIMIT :limit")
+    suspend fun getPageAfter(afterTimestamp: Long, limit: Int): List<MotionSample>
+
     @Query("SELECT * FROM motion_samples WHERE timestamp >= :fromTs AND timestamp <= :toTs ORDER BY timestamp DESC")
     fun getBetween(fromTs: Long, toTs: Long): Flow<List<MotionSample>>
 

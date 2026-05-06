@@ -565,3 +565,33 @@
 - `trK` と `stK4` の判定式を、世界座標系 `TYPE_LINEAR_ACCELERATION` の水平成分だけを使う方式へ変更した。1 秒窓 / 3 秒窓それぞれで `m=average(h_i)`, `k=|m|`, `u=m/k`, `p_i=h_i・u`, `sigma=stddev(p_i)`, `ratio=sigma/k` を計算し、`k >= *_AvgThreshold` かつ `ratio <= *_RatioThreshold` を満たすときだけ `trK=ON` / `STK4` とする。`k≈0` では ratio を計算せず不成立とした。補助ログ CSV も `KDirectionalityRatio / TrKDirectionalityRatio` を現行ヘッダへ戻した。
 - 2026-04-28: 補助ログバックアップが 0 byte のまま残る事象を追跡。`SettingsViewModel.exportMotionSamplesToUri()` が `motionSampleDao().getSince(0L).first()` の Flow 初回 emit 待ちで止まると、`ACTION_CREATE_DOCUMENT` で作られた空ファイルだけが残る構造だった。`MotionSampleDao.getSinceOnce()` / `LogDao.getEntriesSinceOnce()` を追加し、export は one-shot query に変更。あわせて `EXPORT_*_STARTED` と query 失敗ログを追加して、次回同系統の停止点を判別できるようにした。
 - `MotionSample` の保存ルーチンを `LoggingConfig.MOTION_LOG_ROUTINE` で切り替えるようにした。既定は `NORMAL` とし、`kStatus / trKStatus / wStatus / stepDeltaWindow / confirmedMode / constantRegion* / stepDelta3s` など表示維持に必要な最小限のみ保存する。従来の全項目保存は `FULL` ルーチンとして残し、必要時は設定定数 1 箇所で即座に戻せるようにした。
+
+## 2026-05-05
+
+- 主記録の気圧保存を 3 秒ごとから 3 分ごとへ間引き、GPS と歩数は従来どおり 3 秒スロットで保存する方針へ変更した。気圧を保存しないスロットでは `PresRaw / PresQnh` を空欄にし、表示側は直近有効値を使う。
+- `motion_samples` の新規保存を 3 秒ごとの全サンプルから状態変化点中心へ変更した。`KStatus / TrKStatus / WStatus / ConfirmedMode / ConstantRegionKind` のいずれかが変化したときだけ Room / CSV へ保存し、表示側は前方補完で状態を復元する。
+- 状態イベントログ CSV の出力名を `motion_events_yyyyMMdd.csv` / `gps_pressure_motion_events_backup_yyyyMMdd_HHmmss.csv` へ変更し、旧 `motion_metrics` 系は import / viewer 互換入力として維持した。
+- 状態イベントの診断値として `StKAvg / StKRatio / TrKAvg / TrKRatio` を出力するよう整理した。`TrKRatio` は算出不能時に空欄を許容する。
+- 地図の状態ラベルを `AC`（STK4 enter）、`STAY`、`CMOV` のみに整理し、trK ラベルは `tON` のみ表示するよう Android / Windows viewer を揃えた。
+- `functional_spec.md`、`design_doc.md`、`data_spec.md`、`room_data_spec.md`、`import_export_spec.md` を状態イベントログと気圧間引き仕様へ更新した。
+- 表示用 GPS 単発ジャンプ除去を、前後点 `A/C` の時刻補間位置 `P` と中央点 `B` の偏差速度で判定する方式へ変更した。`2 * distance(P, B) / (time(C)-time(A)) >= 100km/h` の場合に `B` を除外し、Android アプリ / widget と Windows viewer の式を揃えた。
+
+## 2026-05-06
+
+- 状態イベントログの手動 export が過去の `motion_samples` 全件を一括取得して 0 byte ファイルを残す問題を修正した。Room から 1000 件ずつページ読み出しし、CSV へ逐次書き込む方式へ変更した。
+- `BootReceiver` がアプリ更新直後にバックグラウンドから位置情報 foreground service を起動してクラッシュする問題を避けるため、`MY_PACKAGE_REPLACED` / `BOOT_COMPLETED` では自動再開せず、調査ログのみ残すよう変更した。
+- GPS 欠損区間の地図表示で、前後の有効 GPS 点が 1 分以上 10 分以内なら 30 秒間隔の表示用補間点を挿入するよう Android アプリ / widget と Windows viewer を揃えた。状態イベントラベルも最近傍 GPS 点ではなくイベント時刻の補間位置へ配置する。
+- viewer と Android 側の進行方向マーカーを、モード色の丸背景に白い `>` を載せる表示へ変更し、軌跡線と同色で埋もれにくくした。
+- viewer の `tON` が補間位置と元 GPS 近傍に縦積みされて見える問題に対し、`trK` ラベルはイベント時刻の補間位置へ置いたうえで、同じ場所付近かつ短時間の重複を 1 件へ抑制するよう変更した。Android 側の `buildTrkLabels()` も同じ抑制を入れた。
+- viewer / Android の進行方向マーカー計算を、元 GPS 点の頂点へ置く方式から、画面上の折れ線距離に沿って一定間隔でサンプリングする方式へ変更した。GPS 点が密な区間やズームアウト時でも、表示可能な線分長があれば `>` が出るようにした。
+- viewer の地図線幅を Android アプリ地図と同じく全モード共通 4px 相当にそろえ、CSS border を含む実外径が Android の描画円径 / 線幅比率と合うよう `>` 方向マーカー、始点、終点、停止点を再調整した。
+- Android / viewer の進行方向マーカー配置間隔を固定値ではなく線幅比例に変更した。配置間隔は線幅の 9 倍、接線計算距離は 3 倍、始終端スキップは 4.5 倍として、線が太い表示では間隔を長く、線が細い表示では間隔を短くする。
+- Android 側の進行方向マーカー配置は線幅比例化で見た目が変わったため、アプリ地図とウィジェットは従来の固定値（app: 36dp / 12dp / 18dp、widget: 44dp / 12dp / 18dp）へ戻した。viewer 側の線幅比例設定は維持する。
+- Android 側の進行方向マーカー描画イメージも、丸背景付きではなく従来の「モード色の `>` 文字 + 白い縁取り」へ戻した。対象はアプリ地図 `MapScreen` と地図ウィジェット `MapWidgetReceiver`。
+- Windows viewer の進行方向マーカーも Android と同じく、丸背景なしの「モード色の `>` 文字 + 白い縁取り」へ変更した。サイズ比率は viewer の線幅に合わせた現在値を維持する。
+- Windows viewer の地図軌跡に hover 用の透明 polyline を追加し、マウス位置に最も近い表示点の日時を tooltip 表示するようにした。スプライン補間点にも前後点から線形補間した時刻を持たせた。
+- `2026-05-05 12:39:36-12:54:03` の最新ログを確認し、実際には `trK=ON` が継続しておらず、GPS 座標が同一点へ固定されていたため同じ場所の `tON` が複数表示されて連続して見えていたことを確認した。`tON` の近接重複抑制を 5 分から 20 分へ広げ、同一点での見かけ上の連続表示を減らした。
+- `2026-05-05 12:39:38-12:54:06` は同一 GPS 座標が約 14 分半続き、`12:54:09` に約 4.9km 離れた座標へ復帰していた。欠損ではなく凍結座標の連続だったため、表示補間と tooltip が道路外の直線移動に見えていた。Android / viewer に GPS 凍結復帰検知を追加し、復帰点の直前で表示セグメントを切って、平準化・スプライン・進行方向マーカーが凍結点と復帰点を通常線として結ばないようにした。凍結中の経路不明区間はオレンジ色破線で別描画し、viewer では破線上の tooltip も凍結開始から復帰までの時刻補間で表示する。補正あり表示でも破線境界が速度フィルタや単発ジャンプ除去で消えないよう固定した。
+- Android アプリ地図の移動・ズームが重くなったため、進行方向 `>` の描画負荷も疑ったが、アプリ本体だけのスプライン中間点削減は見た目を変えてしまうため取り消した。Android アプリ地図の `>` は `GpsUtil.buildDisplayPolyline()` の標準補間点列を使う。
+- 地図画面が `Flow` で 1 日分の `log_entries` / `motion_samples` をライブ監視していたため、記録中は 3 秒ごとの DB insert で全日分の地図前処理と overlay 再作成が走り、パン・ズーム中に割り込む構造だった。`MapViewModel` を対象日選択時の one-shot 読み込みへ変更し、地図操作中にログ追加で再描画されないようにした。
+- Android アプリ本体の `>` が表示されない原因を実機ログで確認し、`track=34649` に対して `arrows=0` になっていたことを特定した。スプライン補間で隣接点の画面距離が小さくなり、既存点ベースの角度計算が全件スキップしていたため、画面上の折れ線距離に沿って一定間隔でサンプリングし、前後のサンプル点から接線角を求める方式へ戻した。描画イメージは従来どおり個別 `Marker` の bitmap icon で、モード色の `>` 文字に白い縁取りを付ける。
