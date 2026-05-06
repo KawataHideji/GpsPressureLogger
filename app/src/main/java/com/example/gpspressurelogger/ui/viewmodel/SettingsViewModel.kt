@@ -21,9 +21,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val db = AppDatabase.getInstance(application)
     private val settings = SettingsRepository(application)
 
-    val intervalSec: StateFlow<Int> = settings.intervalSec
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsRepository.DEFAULT_INTERVAL_SEC)
-
     val lookbackMin: StateFlow<Int> = settings.lookbackMin
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsRepository.DEFAULT_LOOKBACK_MIN)
 
@@ -50,10 +47,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     val verboseDebugLogEnabled: StateFlow<Boolean> = settings.verboseDebugLogEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
-
-    fun setIntervalSec(value: Int) = viewModelScope.launch {
-        settings.setIntervalSec(value)
-    }
 
     fun setLookbackMin(value: Int) = viewModelScope.launch {
         settings.setLookbackMin(value)

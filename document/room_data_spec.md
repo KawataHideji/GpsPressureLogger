@@ -1,6 +1,6 @@
 # Room 内部データ仕様書
 
-最終更新: 2026-04-20
+最終更新: 2026-05-06
 
 ## 1. 目的
 
@@ -219,6 +219,8 @@ Room は表示都合の派生値ではなく、できるだけ元の意味に近
 - `motion_samples.gpsImmediate: Boolean?`
   - nullable
   - 即時 GPS 取得要求の有無
+  - SQLite では `INTEGER` として保存し、`true` を `1`、`false` を `0`、欠損を `null` とする
+  - 外部 CSV (`GpsImmediate`) は `1 / 0 / 空欄` で表現する
 
 - `motion_samples.confirmedMode: String?`
   - nullable

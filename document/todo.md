@@ -36,7 +36,7 @@
 - 補正気圧系列が白で表示され、既存の背景や他系列と視認性が崩れていないか実機確認する
 - 完全停止 `DEVICE_STILL` の 2m 停止標準化が実機でも十分に GPS ブレを抑えられているか確認する
 - 新状態管理の GPS 取得間隔 (`trK=ON遷移時即時 / STK4=2秒 / W1=5秒 / その他=5秒から5秒ずつ最大30秒まで引き延ばし`) が、意図どおり切り替わるか実機確認する
-- `trKAvgThreshold=0.12` と `stK4AvgThreshold=0.20` で車両・電車の減速、右左折、カーブ、発進時に `TRK_GPS_IMMEDIATE` が出て GPS が起き、3秒スロットでは `STK4` が保存されるか実機確認する
+- `trKAvgThreshold=0.10`、`trKRatioThreshold=0.75`、`stK4AvgThreshold=0.08`、`stK4RatioThreshold=0.75` で車両・電車の減速、右左折、カーブ、発進時に `TRK_GPS_IMMEDIATE` が出て GPS が起き、3秒スロットでは `STK4` が保存されるか実機確認する
 - 補助ログ CSV / Room に保存される `KAvg / KScalarAvg / KVariance / TrKAvg` が実機ログで埋まり、4/26 のような「車移動だが STK4 が出ない」区間の原因切り分けに使えるか確認する
 - `TRK_GPS_IMMEDIATE` 後に `GPS_BURST_START / CANDIDATE / ACCEPT / REJECT` が出力され、GPS 空欄が続く区間で「候補なし」か「低精度棄却」かを区別できるか実機ログで確認する
 - その他状態の GPS 間隔伸長が、採用可能GPS（位置あり、精度80m以下）を得られた場合だけ進み、欠損・低精度では5秒へ戻るか実機確認する

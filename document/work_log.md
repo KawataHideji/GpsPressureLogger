@@ -595,3 +595,6 @@
 - Android アプリ地図の移動・ズームが重くなったため、進行方向 `>` の描画負荷も疑ったが、アプリ本体だけのスプライン中間点削減は見た目を変えてしまうため取り消した。Android アプリ地図の `>` は `GpsUtil.buildDisplayPolyline()` の標準補間点列を使う。
 - 地図画面が `Flow` で 1 日分の `log_entries` / `motion_samples` をライブ監視していたため、記録中は 3 秒ごとの DB insert で全日分の地図前処理と overlay 再作成が走り、パン・ズーム中に割り込む構造だった。`MapViewModel` を対象日選択時の one-shot 読み込みへ変更し、地図操作中にログ追加で再描画されないようにした。
 - Android アプリ本体の `>` が表示されない原因を実機ログで確認し、`track=34649` に対して `arrows=0` になっていたことを特定した。スプライン補間で隣接点の画面距離が小さくなり、既存点ベースの角度計算が全件スキップしていたため、画面上の折れ線距離に沿って一定間隔でサンプリングし、前後のサンプル点から接線角を求める方式へ戻した。描画イメージは従来どおり個別 `Marker` の bitmap icon で、モード色の `>` 文字に白い縁取りを付ける。
+- Windows viewer の `>` が `Maximum call stack size exceeded` で出なくなった原因は、`gpsGapBreak` で分割した境界点を次 chunk に再投入し、同じ境界点で再帰し続けていたことだった。境界点を次 chunk へ入れないよう修正し、矢印計算は線描画後に実行して例外時も線自体が消えないようにした。調査用に一時追加した画面デバッグ表示と `viewer_debug_log.txt` 出力は削除済み。
+- この復旧で誤って Windows viewer の `>` サイズを過去の暫定値 `font-size 30px / iconSize 44px` に戻したため、再度 `font-size 16px / iconSize 16px / iconAnchor 8px` へ戻した。今後、表示復旧や glyph 変更をしても、このサイズ調整値を変更しない。
+- `STK4` を拾いやすくするため、`MotionStateParams.stK4AvgThreshold` を `0.15` から `0.08` へ下げ、`stK4RatioThreshold` を `0.8` から `0.75` へ変更した。3 秒窓の平均水平加速度 `StKAvg >= 0.08` かつ方向性比率 `StKRatio <= 0.75` で `STK4` とする。

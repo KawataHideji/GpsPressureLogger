@@ -19,8 +19,6 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 class SettingsRepository(private val context: Context) {
 
     companion object {
-        /** GPS記録間隔（秒） */
-        val KEY_INTERVAL_SEC = intPreferencesKey("interval_sec")
         /** グラフで遡る時間（分） */
         val KEY_LOOKBACK_MIN = intPreferencesKey("lookback_min")
         /** 気圧・標高ウィジェット更新間隔（秒） */
@@ -29,8 +27,6 @@ class SettingsRepository(private val context: Context) {
         val KEY_MAP_WIDGET_INTERVAL_MIN = intPreferencesKey("map_widget_interval_min")
         /** ウィジェットの背景透明度 (0-255) */
         val KEY_WIDGET_TRANSPARENCY = intPreferencesKey("widget_transparency")
-        /** GPS不在時のセンサー強制記録間隔（秒） */
-        val KEY_SENSOR_ONLY_INTERVAL_SEC = intPreferencesKey("sensor_only_interval_sec")
         /** import 用の標準バックアップ CSV URI */
         val KEY_IMPORT_FILE_URI = stringPreferencesKey("import_file_uri")
         /** import 用の補助センサー判定ログ CSV URI */
@@ -44,19 +40,14 @@ class SettingsRepository(private val context: Context) {
         /** 起動時歩数修復の実行済みバージョン */
         val KEY_STEP_REPAIR_VERSION = intPreferencesKey("step_repair_version")
 
-        const val DEFAULT_INTERVAL_SEC = 10
         const val DEFAULT_LOOKBACK_MIN = 3 * 24 * 60
         const val DEFAULT_PRESSURE_WIDGET_INTERVAL_MIN = 60
         const val DEFAULT_MAP_WIDGET_INTERVAL_MIN = 60
         const val DEFAULT_WIDGET_TRANSPARENCY = 255
-        const val DEFAULT_SENSOR_ONLY_INTERVAL_SEC = 30
         const val CURRENT_STEP_REPAIR_VERSION = 1
         const val MIN_WIDGET_INTERVAL_SEC = 30
         const val MAX_WIDGET_INTERVAL_SEC = 300
     }
-
-    val intervalSec: Flow<Int> = context.dataStore.data
-        .map { it[KEY_INTERVAL_SEC] ?: DEFAULT_INTERVAL_SEC }
 
     val lookbackMin: Flow<Int> = context.dataStore.data
         .map { it[KEY_LOOKBACK_MIN] ?: DEFAULT_LOOKBACK_MIN }
@@ -76,9 +67,6 @@ class SettingsRepository(private val context: Context) {
     val widgetTransparency: Flow<Int> = context.dataStore.data
         .map { it[KEY_WIDGET_TRANSPARENCY] ?: DEFAULT_WIDGET_TRANSPARENCY }
 
-    val sensorOnlyIntervalSec: Flow<Int> = context.dataStore.data
-        .map { it[KEY_SENSOR_ONLY_INTERVAL_SEC] ?: DEFAULT_SENSOR_ONLY_INTERVAL_SEC }
-
     val importFileUri: Flow<String?> = context.dataStore.data
         .map { it[KEY_IMPORT_FILE_URI] }
 
@@ -96,10 +84,6 @@ class SettingsRepository(private val context: Context) {
 
     val stepRepairVersion: Flow<Int> = context.dataStore.data
         .map { it[KEY_STEP_REPAIR_VERSION] ?: 0 }
-
-    suspend fun setIntervalSec(value: Int) {
-        context.dataStore.edit { it[KEY_INTERVAL_SEC] = value }
-    }
 
     suspend fun setLookbackMin(value: Int) {
         context.dataStore.edit { it[KEY_LOOKBACK_MIN] = value }
@@ -119,10 +103,6 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setWidgetTransparency(value: Int) {
         context.dataStore.edit { it[KEY_WIDGET_TRANSPARENCY] = value }
-    }
-
-    suspend fun setSensorOnlyIntervalSec(value: Int) {
-        context.dataStore.edit { it[KEY_SENSOR_ONLY_INTERVAL_SEC] = value }
     }
 
     suspend fun setImportFileUri(value: String?) {

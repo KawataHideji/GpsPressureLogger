@@ -1,6 +1,6 @@
 # データ形式仕様書
 
-最終更新: 2026-04-24
+最終更新: 2026-05-06
 
 ## 1. 目的
 
@@ -70,12 +70,10 @@ Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAv
 - `StKRatio`: 3 秒窓の射影標準偏差比 `sigma / k`。旧ヘッダ `KDirectionalityRatio` は import 互換として受け入れる
 - `TrKAvg`: 1 秒窓の平均水平加速度ベクトルの大きさ `k`
 - `TrKRatio`: 1 秒窓の射影標準偏差比 `sigma / k`。`k` がほぼ 0 の場合など、ratio が成立しないときは空欄を記録する。旧ヘッダ `TrKDirectionalityRatio` は import 互換として受け入れる
-- `TrKAvg`: 直近 1 秒窓の平均水平加速度ベクトルの大きさ `k`
-- `TrKDirectionalityRatio`: 直近 1 秒窓の射影標準偏差比 `sigma / k`
 - `WStatus`: `W1 / W2`
 - `StepDeltaWindow`: `wWindowMs` 内の歩行イベント数 / 歩数増分合計。`WStatus=W1` は `StepDeltaWindow >= wStepDeltaThreshold` かつ最終歩行イベントから `walkingThresholdMs` 以内で判定する
 - `GpsIntervalMs`: 新状態管理が決めた GPS 要求間隔
-- `GpsImmediate`: 直前の 3 秒スロット内で `trK` ON 遷移による即時 GPS 取得要求が発生した場合、または `stK4` へ新規遷移した場合は `1`、それ以外は `0`
+- `GpsImmediate`: 直前の 3 秒スロット内で `trK` ON 遷移による即時 GPS 取得要求が発生した場合、または `stK4` へ新規遷移した場合は `1`、それ以外は `0`。CSV では `0 / 1`、Room では `Boolean?`、空欄は `null` として扱う
 - `# EVENT GPS_BURST_*`: コメント行として出力される加速度トリガー時 GPS burst 要求の診断ログ。`START`、`CANDIDATE`、`ACCEPT`、`REJECT`、`STOP`、`SKIPPED_COOLDOWN`、`UNAVAILABLE`、`SECURITY_ERROR` を使い、CSV の通常データ列形式は変更しない
 - `ConfirmedMode`: 確定キャッシュとして保存するアプリ表示用の `DEVICE_STILL / STOPPED / WALKING / VEHICLE / UNKNOWN`。現在まで継続中の未確定領域では空欄を許容する。
 - `ConstantRegionKind`: 定速領域終了時の `NONE / STAY / CONSTANT_MOVE`

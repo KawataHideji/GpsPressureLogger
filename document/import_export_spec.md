@@ -1,6 +1,6 @@
 # Import / Export 仕様書
 
-最終更新: 2026-04-26
+最終更新: 2026-05-06
 
 ## 1. 目的
 
@@ -185,28 +185,20 @@ export は次の用途に使う。
 
 ## 7. 外部保存先の方針
 
-想定ディレクトリ:
+アプリが端末上で常設管理するディレクトリ:
 
-- `logs/`
-- `exports/`
-- `debug/`
+- ルートは app-specific external storage 配下の `GpsPressureLogger/`（取得不能時は内部保存へフォールバック）
+- 日常ログ: `GpsPressureLogger/logs/gps_log_yyyyMMdd.csv`（03:00 区切り）
+- 状態イベントログ（補助センサー判定ログ）: `GpsPressureLogger/metrics/motion_events_yyyyMMdd.csv`（03:00 区切り）
+  - 旧 `metrics/motion_metrics_yyyyMMdd.csv` は互換入力として読み、追記前にヘッダを新形式へ自動更新する
+- デバッグログ: `GpsPressureLogger/debug/debug_log.txt`
 
-例:
+手動 export とデバッグ共有は、ユーザーが SAF (`ACTION_CREATE_DOCUMENT`) で選んだ単一 URI に対して書き込む。アプリ側で固定ディレクトリ（`exports/` 等）は持たない。
 
-- `logs/log_YYYYMMDD.csv`
-- `exports/export_YYYYMMDD_HHMMSS.csv`
-- `metrics/motion_events_YYYYMMDD.csv`
-- `exports/gps_pressure_motion_events_backup_YYYYMMDD_HHMMSS.csv`
-- 旧 `metrics/motion_metrics_YYYYMMDD.csv` / `exports/gps_pressure_motion_metrics_backup_*.csv` は互換入力として読む
-- `debug/debug_log_YYYYMMDD.txt`
-
-現行実装:
-
-- ルートは app-specific external storage 配下の `GpsPressureLogger/` を優先する
-- 日常ログは `GpsPressureLogger/logs/`
-- 補助センサー判定ログは `GpsPressureLogger/metrics/`
-- デバッグログは `GpsPressureLogger/debug/`
-- デバッグ共有が有効な場合は、`ACTION_CREATE_DOCUMENT` で選択した単一ログファイル URI にも重要ログを追記する
+- 主記録手動バックアップ: `gps_pressure_full_backup_yyyyMMdd_HHmmss.csv`
+- 状態イベントログ手動バックアップ: `gps_pressure_motion_events_backup_yyyyMMdd_HHmmss.csv`
+  - 旧 `gps_pressure_motion_metrics_backup_*.csv` は互換入力として読む
+- デバッグ共有 URI: ユーザーが事前に `ACTION_CREATE_DOCUMENT` で選んだ単一 `app_debug_log.txt` 等に追記する
 
 ## 8. Python コンバータとの責務分担
 

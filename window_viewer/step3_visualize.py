@@ -1453,7 +1453,7 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
         linear-gradient(180deg, #09111f 0%, #0f1d36 100%);
     }}
     .page {{
-      max-width: 1400px;
+      max-width: 2450px;
       margin: 0 auto;
       padding: 24px;
     }}
@@ -1581,7 +1581,7 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
     }}
     .layout {{
       display: grid;
-      grid-template-columns: 1.3fr 0.8fr;
+      grid-template-columns: 1.3fr 2.4fr;
       gap: 20px;
     }}
     .stack {{
@@ -2185,7 +2185,6 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
         if (point.isStayAggregate || point.gpsGapBreak) {{
           if (current.length >= 2) chunks.push(current);
           current = [];
-          if (!point.isStayAggregate) current.push(point);
         }} else {{
           current.push(point);
         }}
@@ -3250,21 +3249,24 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
       updateStopDeviationChart(rawGpsPoints, deviationPoints);
 
       const focusedPoints = filterMapPointsByFocus(displayPoints);
-      if (focusedPoints.length === 0) return;
+      if (focusedPoints.length === 0) {{
+        return;
+      }}
 
       // 地図境界フィット
       const allLats = focusedPoints.map((p) => p.lat);
       const allLons = focusedPoints.map((p) => p.lon);
+      map.invalidateSize();
       map.fitBounds(
         L.latLngBounds(
           [Math.min(...allLats), Math.min(...allLons)],
           [Math.max(...allLats), Math.max(...allLons)]
         ),
-        {{ padding: [32, 32] }}
+        {{ padding: [32, 32], animate: false }}
       );
+      map.invalidateSize();
 
       const smoothed = smoothGpsPoints(focusedPoints);
-
       // モード別ポリライン（Android splineMovingTrack + splitTrackByMode 相当）
       const segments = buildModeSegments(smoothed);
       const gpsGapSegments = buildGpsGapBreakSegments(smoothed);
@@ -3323,7 +3325,12 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
       }});
 
       // 方向矢印マーカー（Android computeDirectionArrowMarkersOnScreen() に対応）
-      const arrowMarkers = computeDirectionArrowMarkersOnScreen(smoothed);
+      let arrowMarkers = [];
+      try {{
+        arrowMarkers = computeDirectionArrowMarkersOnScreen(smoothed);
+      }} catch (error) {{
+        arrowMarkers = [];
+      }}
       arrowMarkers.forEach((marker) => {{
         const color = modeColors[marker.displayMode] || modeColors.UNKNOWN;
         L.marker([marker.lat, marker.lon], {{
