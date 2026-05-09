@@ -132,6 +132,14 @@ class LoggingService : Service(), SensorEventListener {
     private var burstGpsTimeoutJob: Job? = null
     private var burstBestLocation: android.location.Location? = null
     private var burstCandidateCount: Int = 0
+    // バースト世代カウンタ。requestBurstLocationIfDue で stopBurstGps 後にインクリメントし、
+    // その時点で生成した LocationCallback / timeout coroutine の closure に capture する。
+    // 入口（handleBurstGpsCandidate / finalizeBurstGps）で「自分が capture した世代」と現在値を比較し、
+    // 一致しなければ no-op で抜ける。これにより以下の競合を塞ぐ:
+    //   1) timeoutJob.cancel() が間に合わず stale finalizeBurstGps("timeout") が新バーストの callback を殺す
+    //   2) removeLocationUpdates 後に FusedLocationProviderClient が遅延配信した古いイベントを
+    //      新バーストのカウンタ・best location として誤採用する
+    private var burstGeneration: Int = 0
     private var previousGpsAggregationMode = GpsAggregationMode.UNKNOWN
     private var lastPressureRecordMs: Long = 0L
     private var lastLoggedStKStatus: StKStatus? = null
@@ -527,6 +535,11 @@ class LoggingService : Service(), SensorEventListener {
         }
         lastBurstGpsRequestMs = nowMs
         stopBurstGps("replaced")
+        // 旧バーストの in-flight イベント・stale timeout を世代不一致で弾くため、
+        // ここで世代を進める。stopBurstGps が callback を null にしたあとに進めることで、
+        // late callback と新バーストの世代がきれいに分離される。
+        burstGeneration += 1
+        val gen = burstGeneration
         val requestStartedMs = System.currentTimeMillis()
         burstBestLocation = null
         burstCandidateCount = 0
@@ -543,7 +556,7 @@ class LoggingService : Service(), SensorEventListener {
                 .build()
             ExportUtil.writeDebugLog(
                 this,
-                "GPS_BURST_START: ts=$nowMs priority=HIGH_ACCURACY " +
+                "GPS_BURST_START: ts=$nowMs gen=$gen priority=HIGH_ACCURACY " +
                     "intervalMs=${LoggingConfig.GPS_BURST_INTERVAL_MS} " +
                     "minIntervalMs=${LoggingConfig.GPS_BURST_MIN_INTERVAL_MS} " +
                     "maxUpdateAgeMs=${LoggingConfig.GPS_BURST_MAX_UPDATE_AGE_MS} " +
@@ -554,7 +567,7 @@ class LoggingService : Service(), SensorEventListener {
             val callback = object : LocationCallback() {
                 override fun onLocationResult(result: LocationResult) {
                     result.locations.forEach { location ->
-                        handleBurstGpsCandidate(location, requestStartedMs)
+                        handleBurstGpsCandidate(location, requestStartedMs, gen)
                     }
                 }
 
@@ -562,7 +575,7 @@ class LoggingService : Service(), SensorEventListener {
                     if (!availability.isLocationAvailable) {
                         ExportUtil.writeDebugLog(
                             this@LoggingService,
-                            "GPS_BURST_UNAVAILABLE: elapsedMs=${System.currentTimeMillis() - requestStartedMs}"
+                            "GPS_BURST_UNAVAILABLE: gen=$gen elapsedMs=${System.currentTimeMillis() - requestStartedMs}"
                         )
                     }
                 }
@@ -571,7 +584,7 @@ class LoggingService : Service(), SensorEventListener {
             fusedLocationClient.requestLocationUpdates(request, callback, Looper.getMainLooper())
             burstGpsTimeoutJob = serviceScope.launch {
                 delay(LoggingConfig.GPS_BURST_DURATION_MS + 500L)
-                finalizeBurstGps("timeout")
+                finalizeBurstGps("timeout", expectedGen = gen)
             }
         } catch (e: SecurityException) {
             ExportUtil.writeDebugLog(
@@ -583,7 +596,14 @@ class LoggingService : Service(), SensorEventListener {
     }
 
     @Synchronized
-    private fun handleBurstGpsCandidate(location: android.location.Location, requestStartedMs: Long) {
+    private fun handleBurstGpsCandidate(
+        location: android.location.Location,
+        requestStartedMs: Long,
+        expectedGen: Int
+    ) {
+        // 旧バーストの callback から removeLocationUpdates 後に遅延配信されたイベントは、
+        // ここで世代不一致として弾く。これがないと新バーストのカウンタ・best location を汚染する。
+        if (expectedGen != burstGeneration) return
         if (burstGpsCallback == null) return
         burstCandidateCount += 1
         val elapsedMs = System.currentTimeMillis() - requestStartedMs
@@ -611,7 +631,12 @@ class LoggingService : Service(), SensorEventListener {
     }
 
     @Synchronized
-    private fun finalizeBurstGps(reason: String) {
+    private fun finalizeBurstGps(reason: String, expectedGen: Int? = null) {
+        // timeout coroutine から呼ばれた場合は capture 時の世代と現在世代が一致しないと
+        // 「既に置き換わったバーストの timeout」なので no-op で抜ける。
+        // handleBurstGpsCandidate からの max_updates 経路では expectedGen=null で素通り
+        //（呼び出し元で世代チェック済み）。
+        if (expectedGen != null && expectedGen != burstGeneration) return
         val callback = burstGpsCallback ?: return
         val best = burstBestLocation
         val bestAccuracy = best?.takeIf { it.hasAccuracy() }?.accuracy
