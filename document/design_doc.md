@@ -76,8 +76,8 @@
   - 地図画面向けに、停止点を保ったまま移動区間だけを軽く平準化し、tension 付き Catmull-Rom 系スプラインで描画用点列へ展開する。
   - 地図表示向けに、停止候補区間の GPS ブレを目標半径以内へ抑える `normalizeStopsForDisplay()` を提供する。
   - `buildDisplayPolyline()` で、viewer を基準にした折れ線生成を app / widget 共通関数として提供する。
-  - `buildDisplayPolyline()` は各点へ `displayMode` を付与し、viewer と同じモード別配色の折れ線を app / widget 共通で生成する。`STAY` 点は移動チャンクの境界として扱い、徒歩と高速移動は同じ移動チャンク内で連続スプライン化する。
-  - `buildStateLabels()` は `stK / W / ConstantRegionKind` の遷移点を、`buildTrkLabels()` は `trK` の `ON / OFF` 遷移点を、それぞれ GPS 座標へひも付けたラベル配列として返す。
+  - `buildDisplayPolyline()` は各点へ `displayMode` を付与し、viewer と同じモード別配色の折れ線を app / widget 共通で生成する。停止代表点は移動チャンクの境界として扱い、徒歩と高速移動は同じ移動チャンク内で連続スプライン化する。
+  - `buildStateLabels()` は `stK / W / ConstantRegionKind` の遷移点を、`buildTrkLabels()` は `trK4` の遷移点を、それぞれ GPS 座標へひも付けたラベル配列として返す。
   - `computeDirectionArrowMarkers()` で、折れ線の局所接線方向から `>` 風の進行方向マーカー位置と向きを共通計算する。方向マーカーも `STAY` 点をまたがず、移動チャンクごとに計算する。
   - アプリ地図と地図ウィジェットでは、方向マーカー密度の決定には screen px 距離ベースの `computeDirectionArrowMarkersOnScreen()` を使う。
   - 地図ウィジェット向けには `computeDirectionArrowMarkersOnScreen()` を別に持ち、widget bitmap 上の screen px 距離で方向マーカーの間隔・最小セグメント長・始終端スキップ距離を決める。
@@ -116,18 +116,18 @@
   - 歩数の日替わりは `MotionStateParams.stepResetHour` を参照し、既定は 03:00 とする。
 - `TrKDetector`
   - GPS 即時起動専用の加速度トリガーを判定する。
-  - 直近 `trKWindowMs` の変換済み加速度から水平成分 `h_i=(x_i,y_i)` だけを取り出し、`m=average(h_i)`, `k=|m|`, `u=m/k`, `p_i=h_i・u`, `sigma=stddev(p_i)`, `ratio=sigma/k` を計算する。
-  - `TrKAvg(=k) >= trKAvgThreshold` かつ `TrKDirectionalityRatio(=ratio) <= trKRatioThreshold` なら、その時点で `trK=ON` とする。`k` が十分小さい場合は ratio を計算せず `OFF` とする。delay は使わない。
-  - `OFF -> ON` 遷移した瞬間だけ `LoggingService` へ通知し、3 秒 base cycle を待たず GPS を 1 回起こす。
+  - 過去 `trKDirectionWindowMs=2s` の変換済み加速度から水平平均方向 `H` を求め、直近 `trKWindowMs=1s` の水平サンプル `k_i` を `H` へ射影して `Hk_i` を得る。
+  - `TrKAvg=average(Hk_i)`, `TrKRatio=stddev(Hk_i)/abs(TrKAvg)` とし、`abs(TrKAvg) < 0.015` なら `trK1`、`0.05 <= abs(TrKAvg) < 0.28`、`Hk_i` に `TrKAvg` と逆符号の値がない、かつ `TrKRatio <= 0.65` なら `trK4`、それ以外は `trK2/trK3` とする。`H` や ratio が成立しない場合は `trK2/trK3` とする。delay は使わない。
+  - `trK4` へ遷移した瞬間だけ `LoggingService` へ通知し、3 秒 base cycle を待たず GPS を 1 回起こす。
 - `StKSlotClassifier`
   - 3 秒ログスロットの正式な加速度状態 `stK` を判定する。
   - 前回 base cycle から今回 base cycle までの変換済み加速度列全体を消費し、同じ水平成分ベース式で `KAvg(=k)` と `KDirectionalityRatio(=ratio)` を計算し、あわせて `stK2` 用にスカラー平均 `KScalarAvg` と合成加速度ノルム分散 `KVariance` も保存する。
-  - `KAvg >= stK4AvgThreshold(0.08)` かつ `KDirectionalityRatio <= stK4RatioThreshold(0.75)` なら `STK4`、それ以外で `KScalarAvg >= stK2ScalarAvgThreshold` または `KVariance >= stK2VarianceThreshold` なら `STK2`、どちらでもなければ `STK1` とする。
+  - `abs(StKAvg) < stK1AvgThreshold(0.015)` なら `STK1`、`0.08 <= abs(StKAvg) < 0.28`、射影値に逆符号がない、かつ `StKRatio <= 0.75` なら `STK4`、それ以外は `STK2` とする。`KScalarAvg >= stK2ScalarAvgThreshold` または `KVariance >= stK2VarianceThreshold` は `STK2` の参考指標として保存する。
 - `GpsSamplingPolicy`
-  - `stK` と `w-status` から GPS 取得間隔を決める。分岐は `STK4`、`W1`、その他の 3 つに限定する。`trK` ON への確定遷移時の 1 回目の即時取得は `LoggingService` の `trK` 変更 callback が担当する。
+  - `stK` と `w-status` から GPS 取得間隔を決める。分岐は `STK4`、`W1`、その他の 3 つに限定する。`trK4` への確定遷移時の 1 回目の即時取得は `LoggingService` の `trK` 変更 callback が担当する。
   - 暫定 `CONSTANT_MOVE` は GPS 取得間隔の特別扱いには使わない。
 - `ConstantRegionTracker`
-  - `(STK1 or STK2) and W2` の区間を定速領域として管理する。
+  - `W2` の区間を定速領域として管理する。
   - 区間内 GPS 点列へ直線近似を行い、区間終了時に `STAY / CONSTANT_MOVE` を確定する。
 - `GpsSpeedTracker`
   - 直近 `walkingSpeedWindowMs` 内の GPS 点列からGPS速度を計算する。
@@ -200,7 +200,7 @@
   - `2026-04-12 10:50-11:30`
   - `11:03`, `11:10`, `11:13`, `11:15`, `11:21`, `11:28`
 - Android 側の折れ線は、app / widget とも `GpsUtil.buildDisplayPolyline()` を通し、viewer の `GPS 平準化 ON` に合わせた表示へ揃える。
-- `GpsUtil.buildDisplayPolyline()` は `MotionSample` の `ConstantRegionKind` と定速領域座標を読み、`STAY` は保存済み `ConstantRegionStayLat/Lon` を使って 1 点の stay point へ畳む。stay point は移動平均・スプライン補間のどちらでも周囲へ引っ張らない。
+- `GpsUtil.buildDisplayPolyline()` は `MotionSample` の `ConfirmedMode / ConstantRegionKind` と定速領域座標を読み、`DEVICE_STILL / STOPPED` の連続区間を代表点 1 点へ畳む。旧ログ互換として `ConstantRegionKind=STAY` の連続区間も保存済み `ConstantRegionStayLat/Lon` を使って代表点へ畳む。停止代表点は移動平均・スプライン補間のどちらでも周囲へ引っ張らない。
 - `GpsUtil.buildDisplayPolyline()` の平滑化は、`WALKING` の同一モード連続チャンクにだけ適用する。`VEHICLE` は点間が粗く曲率変化も大きいため、移動平均で角を削らない。
 - widget の更新周期は `LoggingService.updateWidgetsIfDue()` が唯一の周期管理者として扱い、前回更新時刻との差ではなく「次回予定時刻」に達したかで判定する。
 - `PressureWidgetReceiver` / `MapWidgetReceiver` にはサービス由来更新を再判定する前回時刻ゲートを置かない。呼ばれた receiver は、サービス周期・強制更新・ホスト由来更新のいずれであっても、その呼び出しで必要な描画だけを行う。
@@ -321,28 +321,28 @@
 
 - 加速度は用途を 2 つに分ける。`trK` は GPS を即時に起こすための短周期トリガー、`stK` は 3 秒主記録スロットへ保存する正式な加速度状態である。
 - `LoggingService` は `TYPE_LINEAR_ACCELERATION` と姿勢系センサーを `MotionStateManager` へ投入し、`WorldAccelerationTransformer` が可能な限り世界座標へ変換する。`TYPE_ROTATION_VECTOR` を優先し、未対応時は `TYPE_ACCELEROMETER + TYPE_MAGNETIC_FIELD`、それも不可なら端末座標またはノルム fallback を使う。
-- `TrKDetector` は変換済みの重力除去済み 3 軸加速度を受け取り、直近 `trKWindowMs` の 3 軸ベクトル平均ノルム `TrKAvg` を計算する。`TrKAvg >= trKAvgThreshold` なら `trK=ON`、未満なら `trK=OFF` とする。
-- `trK` は毎センサーイベントで再評価し、`OFF -> ON` 遷移した瞬間だけ、3 秒 base cycle を待たず GPS を 1 回即時取得する。
-- `trK=ON` 確定時の即時GPSは、単発 `CurrentLocationRequest` ではなく短時間の burst `requestLocationUpdates()` で行う。burst は `PRIORITY_HIGH_ACCURACY`、`interval=500ms`、`minInterval=100ms`、`maxUpdateAge=500ms`、`duration=10000ms`、`maxUpdates=10` とし、`accuracy <= 30m` の候補を即採用、良点が来なければ最良候補が `accuracy <= 80m` の場合だけ採用する。通常の `requestLocationUpdates()` も同時に `gpsKMinMs` 周期へ張り替え、burst の開始・候補・採用・棄却を debug event に残して次回解析できるようにする。状態イベントには `TrKStatus / TrKAvg / TrKRatio` を保存する。`TrKRatio` は算出不能時に null を許容する。
+- `TrKDetector` は変換済みの重力除去済み加速度を受け取り、過去 2 秒の水平平均方向 `H` と直近 1 秒の `H` 方向射影から `TrKAvg` と `TrKRatio` を計算する。`abs(TrKAvg) < 0.015` なら `trK1`、`0.05 <= abs(TrKAvg) < 0.28`、射影値に逆符号がない、かつ `TrKRatio <= 0.65` なら `trK4`、それ以外は `trK2/trK3` とする。
+- `trK` は毎センサーイベントで再評価し、`trK4` へ遷移した瞬間だけ、3 秒 base cycle を待たず GPS を 1 回即時取得する。
+- `trK4` 確定時の即時GPSは、単発 `CurrentLocationRequest` ではなく短時間の burst `requestLocationUpdates()` で行う。burst は `PRIORITY_HIGH_ACCURACY`、`interval=500ms`、`minInterval=100ms`、`maxUpdateAge=500ms`、`duration=10000ms`、`maxUpdates=10` とし、`accuracy <= 30m` の候補を即採用、良点が来なければ最良候補が `accuracy <= 80m` の場合だけ採用する。通常の `requestLocationUpdates()` も同時に `gpsKMinMs` 周期へ張り替え、burst の開始・候補・採用・棄却を debug event に残して次回解析できるようにする。状態イベントには `TrKStatus / TrKAvg / TrKRatio` を保存する。`TrKRatio` は算出不能時に null を許容する。
 - `StKSlotClassifier` は前回 base cycle から今回 base cycle までの変換済み加速度列全体を消費し、3 軸ベクトル平均ノルムを `KAvg`、スカラー平均を `KScalarAvg`、合成加速度ノルムの分散を `KVariance` として計算する。
-- `stK` は `KAvg >= stK4AvgThreshold` かつ `KDirectionalityRatio <= stK4RatioThreshold` なら `STK4`、それ以外で `KScalarAvg >= stK2ScalarAvgThreshold` または `KVariance >= stK2VarianceThreshold` なら `STK2`、どちらでもなければ `STK1` とする。現行の外部 CSV は `KStatus / KRawStatus / KAvg / KScalarAvg / KVariance / TrKStatus / TrKRawStatus / TrKAvg` を中心に出力する。
+- `stK` は `abs(StKAvg) < 0.015` なら `STK1`、`0.08 <= abs(StKAvg) < 0.28`、射影値に逆符号がない、かつ `StKRatio <= 0.75` なら `STK4`、それ以外で `KScalarAvg >= stK2ScalarAvgThreshold` または `KVariance >= stK2VarianceThreshold` なら `STK2`、どちらでもなければ `STK2` とする。現行の外部 CSV は `KStatus / KRawStatus / KAvg / KScalarAvg / KVariance / TrKStatus / TrKRawStatus / TrKAvg` を中心に出力する。
 - `StepManager` は `TYPE_STEP_DETECTOR` が使える端末では detector イベントだけの最終発生時刻と event window を保持する。直近 `wWindowMs` 内の歩行イベント数が `wStepDeltaThreshold` 以上、かつ判定時刻と最終歩行イベントとの差が `walkingThresholdMs` 以内なら `W1`、それ以外は `W2` とする。`TYPE_STEP_COUNTER` は保存歩数用であり、detector が使える端末では `W1 / W2` 判定窓へ混ぜない。detector が無い端末だけ counter 増分を歩行イベントの fallback として使う。
-- `GpsSamplingPolicy` は `trK=ON` 遷移または `STK4` を最優先して `gpsKMinMs` を返す。`W1` は `gpsWalkIntervalMs`、その他は `gpsStableInitialMs` から `gpsStretchStepMs` ずつ伸ばし、`gpsStretchMaxMs` を上限とする。`gpsStretchMaxMs` は現状コード固定値 30 秒（`MotionStateParams` の既定値）で、UI からは変更しない。`gpsStretchMaxMs` を将来 `0` にした場合は上限なしで伸ばし続ける挙動も実装上は許す。その他状態の伸長カウンタは、直前スロットの主記録に位置があり、かつ `gpsAccuracy <= GPS_STRETCH_ACCEPT_ACCURACY_M(80m)` の場合だけ進める。欠損または低精度の場合はカウンタを 0 に戻し、次回は 5 秒からやり直す。`trK=ON` または `STK4` 中は伸長カウンタを 0 に戻すため、加速から外れてその他状態へ入った直後は 5 秒から再開する。`trK=ON` への確定遷移そのものは `LoggingService` の `trK` 変更 callback で受け取り、遷移時の 1 回目だけは cooldown を待たず即時 burst を開始する。
-- `ConstantRegionTracker` は `STK4` ではなく、かつ `W2` の区間を定速領域として扱う。区間継続中も base cycle ごとに暫定直線近似 `g(t)` を更新し、暫定 `STAY / CONSTANT_MOVE` を `MotionSample.constantRegionKind` に保存する。
+- `GpsSamplingPolicy` は `trK4` 遷移または `STK4` を最優先して `gpsKMinMs` を返す。`W1` は `gpsWalkIntervalMs`、その他は `gpsStableInitialMs` から `gpsStretchStepMs` ずつ伸ばし、`gpsStretchMaxMs` を上限とする。`gpsStretchMaxMs` は現状コード固定値 30 秒（`MotionStateParams` の既定値）で、UI からは変更しない。`gpsStretchMaxMs` を将来 `0` にした場合は上限なしで伸ばし続ける挙動も実装上は許す。その他状態の伸長カウンタは、直前スロットの主記録に位置があり、かつ `gpsAccuracy <= GPS_STRETCH_ACCEPT_ACCURACY_M(80m)` の場合だけ進める。欠損または低精度の場合はカウンタを 0 に戻し、次回は 5 秒からやり直す。`trK4` または `STK4` 中は伸長カウンタを 0 に戻すため、加速から外れてその他状態へ入った直後は 5 秒から再開する。`trK4` への確定遷移そのものは `LoggingService` の `trK` 変更 callback で受け取り、遷移時の 1 回目だけは cooldown を待たず即時 burst を開始する。
+- `ConstantRegionTracker` は `W2` の区間を定速領域として扱う。区間継続中も base cycle ごとに暫定直線近似 `g(t)` を更新し、暫定 `STAY / CONSTANT_MOVE` を `MotionSample.constantRegionKind` に保存する。
 - `ConstantRegionTracker` は直線近似の前に、点群重心からの距離が中央値 + MAD ベースしきい値を大きく超える孤立 GPS 点を棄却する。これにより stay point と移動ベクトルが単発飛び点に引っ張られるのを避ける。
 - 区間終了時は区間全体の外れ値棄却済み GPS 点を時刻に対して直線近似し、速度が `staySpeedThresholdKmh` 以下なら `STAY`、超えるなら `CONSTANT_MOVE` として確定する。
-- `FinalContextResolver` は `STK4 + W2` を `VEHICLE` とする。`W1` では `GpsSpeedTracker` のGPS速度と `StepDeltaWindow * walkingStepLengthM / walkingSpeedWindowMs` の歩数推定速度を比較し、GPS速度が `walkingVehicleSpeedThresholdKmh` 以上、またはGPS速度と歩数推定速度の差が `walkingGpsStepMismatchThresholdKmh` 以上なら `VEHICLE`、それ以外は `WALKING` とする。直近GPS速度が未取得で `CONSTANT_MOVE` 速度がある場合は、その速度をGPS速度の補助値として使う。`CONSTANT_MOVE` は `VEHICLE`、`STAY + STK1` は `DEVICE_STILL`、`STAY + STK2` は `STOPPED` へ変換する。区間継続中は暫定 `ConstantRegionKind` も参照し、現時点の最善推定で表示を更新できるようにする。
+- `FinalContextResolver` は `STK4 + W2` を `VEHICLE` とする。`W1` では `GpsSpeedTracker` のGPS速度と `StepDeltaWindow * walkingStepLengthM / walkingSpeedWindowMs` の歩数推定速度を比較し、GPS速度が `walkingVehicleSpeedThresholdKmh` 以上、またはGPS速度と歩数推定速度の差が `walkingGpsStepMismatchThresholdKmh` 以上なら `VEHICLE`、それ以外は `WALKING` とする。直近GPS速度が未取得で `CONSTANT_MOVE` 速度がある場合は、その速度をGPS速度の補助値として使う。`STK1` は `DEVICE_STILL`、`(STAY or STK2) and not STK1` は `STOPPED`、`CONSTANT_MOVE` は `VEHICLE` へ変換する。区間継続中は暫定 `ConstantRegionKind` も参照し、現時点の最善推定で表示を更新できるようにする。
 - `MotionStateManager` は `finalMode` とは別に `gpsAggregationMode` を計算する。`STK4`、`W1`、`CONSTANT_MOVE` は `MOVING`、`STAY + STK1` は `DEVICE_STILL`、`STAY + STK2` は `STOPPED` とする。`LoggingService.buildLogEntry()` と `aggregateGpsForSlot()` は `finalMode` ではなく `gpsAggregationMode` を使うため、表示4状態の調整がGPS座標生成へ波及しない。
 - すべての閾値・時間・距離は `MotionStateParamsProvider.current()` から取得し、状態管理クラス内に調整値を直接埋め込まない。
-- 初期パラメータは `baseCycle=3s`, `trKWindow=1s`, `trKAvg=0.10`, `trKRatio=0.75`, `stK4Avg=0.08`, `stK4Ratio=0.75`, `stK2ScalarAvg=0.25`, `stK2Var=0.01`, `wWindow=9s`, `wStepDeltaThreshold=2`, `walkingThreshold=5s`, `walkingSpeedWindow=9s`, `walkingVehicleSpeed=10km/h`, `walkingStepLength=0.60m`, `walkingGpsStepMismatch=5km/h`, `stK4Gps=2s`, `walkGps=5s`, `stableGps=5s+5s*n`, `stableMax=30s`, `gpsStretchAcceptAccuracy=80m`, `gpsBurst=500ms/min100ms/maxAge500ms/duration10s/max10`, `gpsBurstGood=30m`, `gpsBurstUsable=80m`, `staySpeed=2km/h`, `constantRegionMin=15s`, `outlierMad=4.0`, `outlierMin=50m` とする。
+- 初期パラメータは `baseCycle=3s`, `trKWindow=1s`, `trKDirectionWindow=2s`, `trK1Avg=0.015`, `trKAvg=0.05`, `trKAvgUpper=0.28`, `trKRatio=0.65`, `stK1Avg=0.015`, `stK4Avg=0.08`, `stK4AvgUpper=0.28`, `stK4Ratio=0.75`, `stK2ScalarAvg=0.25`, `stK2Var=0.01`, `wWindow=9s`, `wStepDeltaThreshold=2`, `walkingThreshold=5s`, `walkingSpeedWindow=9s`, `walkingVehicleSpeed=10km/h`, `walkingStepLength=0.60m`, `walkingGpsStepMismatch=5km/h`, `stK4Gps=2s`, `walkGps=5s`, `stableGps=5s+5s*n`, `stableMax=30s`, `gpsStretchAcceptAccuracy=80m`, `gpsBurst=500ms/min100ms/maxAge500ms/duration10s/max10`, `gpsBurstGood=30m`, `gpsBurstUsable=80m`, `staySpeed=2km/h`, `constantRegionMin=15s`, `outlierMad=4.0`, `outlierMin=50m` とする。
 - 確定モードは `MotionSample.confirmedMode` に保存し、地図・歩数グラフは新 CSV ではこの値を優先する。旧 CSV で `confirmedMode` が無い場合のみ旧 `MovementDetector` 互換ロジックで表示モードを再構成する。
 - 定速領域が閉じて `STAY / CONSTANT_MOVE` が確定したら、`LoggingService` は `region.startTimestampMs <= timestamp < region.endTimestampMs` の既存 `MotionSample` を読み直し、確定結果で `confirmedMode` と定速領域情報をバックフィルする。終了時刻の行は `STK4` または `W1` の新状態に属するため、バックフィル対象に含めない。Room DB への反映は即時、ローカル motion CSV の再書き換えは debounce / バッチ flush でまとめて実行する。
 - `confirmedMode` は確定キャッシュとして扱い、進行中の未確定領域の `DEVICE_STILL / STOPPED` は保存しない。`STK4`、`W1`、閉じた `STAY / CONSTANT_MOVE` だけを確定済みとして保存する。
 - 表示側の確定ポイントは `GpsUtil.inferModeStates()` が最後に見つけた `confirmedMode` 行である。確定ポイント以前は確定キャッシュを基本に使うが、`ConfirmedMode=WALKING` は表示対象の GPS 点列、`StepDeltaWindow`、`ConstantRegionSpeedKmh` で再評価し、高速移動と判定できる場合は `VEHICLE` として描画する。確定ポイント以後だけ raw の `KStatus(stK) / WStatus / ConstantRegionKind` から暫定状態を計算する。
 - バックフィル後は Room の `motion_samples` を `insertAllReplace()` で更新し、日次補助 CSV も同じ timestamp の行を置き換える。これにより、区間序盤の暫定判断が確定後のログ・表示に残らない。
-- 地図表示で `ConstantRegionKind=STAY` かつ stay point 座標がある場合は、区間内 GPS 点を 1 点へ畳んで描く。`ConstantRegionKind=CONSTANT_MOVE` は定速領域メタデータだけを参照し、地図上の座標列は記録された GPS 点をそのまま使う。
-- 地図折れ線の最終描画点列は、`STAY` を境界に分けた移動チャンクごとにローカルメートル座標へ投影し、tension 付き Catmull-Rom 系スプラインで補間してから緯度経度へ戻す。`WALKING` と `VEHICLE` の境界は軌跡としてはつなぐが、色分けは `displayMode` でセグメント分割して維持する。
-- `STAY` 自体は補間に混ぜず停止代表点として固定する。一方、停止以外の移動チャンクは `VEHICLE` を含めて全セグメントをスプライン化し、tension で張り出しを抑える。
+- 地図表示で `DEVICE_STILL` または `STOPPED` が連続する場合は、両者が交互でも区間内 GPS 点を停止代表点 1 点へ畳んで描く。代表点は保存済み stay point 座標を優先し、なければ区間平均を使う。旧ログ互換として `ConstantRegionKind=STAY` だけが連続する区間も同じ代表点へ畳む。`ConstantRegionKind=CONSTANT_MOVE` は定速領域メタデータだけを参照し、地図上の座標列は記録された GPS 点をそのまま使う。
+- 地図折れ線の最終描画点列は、停止代表点を境界に分けた移動チャンクごとにローカルメートル座標へ投影し、tension 付き Catmull-Rom 系スプラインで補間してから緯度経度へ戻す。`WALKING` と `VEHICLE` の境界は軌跡としてはつなぐが、色分けは `displayMode` でセグメント分割して維持する。
+- 停止代表点自体は補間に混ぜず固定する。一方、停止以外の移動チャンクは `VEHICLE` を含めて全セグメントをスプライン化し、tension で張り出しを抑える。
 
 #### 3.1.2 旧 `MovementDetector` 互換方式
 
@@ -366,9 +366,14 @@
 
 - `baseCycleMs = 3000`
 - `trKWindowMs = 1000`
-- `trKAvgThreshold = 0.10`
-- `trKRatioThreshold = 0.75`
+- `trKDirectionWindowMs = 2000`
+- `trK1AvgThreshold = 0.015`
+- `trKAvgThreshold = 0.05`
+- `trKAvgUpperThreshold = 0.28`
+- `trKRatioThreshold = 0.65`
+- `stK1AvgThreshold = 0.015`
 - `stK4AvgThreshold = 0.08`
+- `stK4AvgUpperThreshold = 0.28`
 - `stK4RatioThreshold = 0.75`
 - `stK2ScalarAvgThreshold = 0.25`
 - `stK2VarianceThreshold = 0.01`

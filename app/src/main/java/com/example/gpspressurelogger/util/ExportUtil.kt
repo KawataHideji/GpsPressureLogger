@@ -588,6 +588,74 @@ object ExportUtil {
         }
     }
 
+    suspend fun writeEntriesToUriPaged(context: Context, fileUri: Uri, db: AppDatabase): Boolean {
+        return try {
+            flushPendingCsvQueues(context)
+            val totalRows = db.logDao().countSince(0L)
+            val outputStream = context.contentResolver.openOutputStream(fileUri)
+            if (outputStream == null) {
+                writeLocalDebugLog(
+                    context,
+                    "EXPORT_STANDARD_FAILED uri=$fileUri reason=openOutputStreamReturnedNull rows=$totalRows"
+                )
+                deleteUriQuietly(context, fileUri)
+                return false
+            }
+
+            var exportedRows = 0
+            var lastTimestamp = Long.MIN_VALUE
+            val comments = collectDailyCsvEventComments(context)
+            var commentIndex = 0
+            outputStream.use { out ->
+                BufferedWriter(OutputStreamWriter(out)).use { writer ->
+                    writeCsvComment(writer, "GpsPressureLogger standard backup")
+                    writer.write("$STANDARD_CSV_HEADER\n")
+                    while (true) {
+                        val page = db.logDao().getPageAfter(lastTimestamp, BATCH_SIZE)
+                        if (page.isEmpty()) break
+                        page.forEach { entry ->
+                            while (commentIndex < comments.size && comments[commentIndex].timestamp <= entry.timestamp) {
+                                writer.write(comments[commentIndex].line + "\n")
+                                commentIndex += 1
+                            }
+                            writer.write(logEntryCsvRow(entry) + "\n")
+                        }
+                        exportedRows += page.size
+                        lastTimestamp = page.last().timestamp
+                        writer.flush()
+                    }
+                    while (commentIndex < comments.size) {
+                        writer.write(comments[commentIndex].line + "\n")
+                        commentIndex += 1
+                    }
+                    writer.flush()
+                }
+            }
+
+            val exportedSize = exportedDocumentSize(context, fileUri)
+            if (exportedSize <= 0L) {
+                writeLocalDebugLog(
+                    context,
+                    "EXPORT_STANDARD_FAILED uri=$fileUri reason=emptyDocument rows=$totalRows exportedRows=$exportedRows size=$exportedSize"
+                )
+                deleteUriQuietly(context, fileUri)
+                return false
+            }
+            writeLocalDebugLog(
+                context,
+                "EXPORT_STANDARD_OK uri=$fileUri rows=$totalRows exportedRows=$exportedRows size=$exportedSize"
+            )
+            true
+        } catch (e: Throwable) {
+            writeLocalDebugLog(
+                context,
+                "EXPORT_STANDARD_FAILED uri=$fileUri reason=${e.javaClass.simpleName}:${e.message ?: "unknown"}"
+            )
+            deleteUriQuietly(context, fileUri)
+            false
+        }
+    }
+
     fun writeMotionSamplesToUri(context: Context, fileUri: Uri, samples: List<MotionSample>): Boolean {
         val sortedSamples = samples.sortedBy { it.timestamp }
         return try {

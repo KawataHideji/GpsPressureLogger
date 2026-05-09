@@ -8,8 +8,8 @@ GpsPressureLogger の現行ハイブリッド状態管理（`trK / stK / w-statu
 ## 2. 採用しているロジック
 
 ### 2.1 加速度を 2 経路に分ける `trK` / `stK`
-- `trK`（GPS 即時起動用、1 秒窓）と `stK`（3 秒スロット保存用）を別の判定器として `AccelManager` に同居させ、世界座標へ変換した加速度の水平成分から `k = |average(h_i)|`、`ratio = sigma / k` を求める方式を採用している。
-- `trK=ON` への遷移検知の瞬間に `LoggingService` へ callback し、3 秒 base cycle を待たずに `requestLocationUpdates()` を burst (`interval=500ms`、`duration=10秒`、`maxUpdates=10`) で開始する。
+- `trK`（GPS 即時起動用）は過去 2 秒の平均水平方向 `H` と直近 1 秒の `H` 方向射影、`stK`（3 秒スロット保存用）は 3 秒窓の平均水平ベクトルを使う別判定器として `AccelManager` に同居させている。
+- `trK4` への遷移検知の瞬間に `LoggingService` へ callback し、3 秒 base cycle を待たずに `requestLocationUpdates()` を burst (`interval=500ms`、`duration=10秒`、`maxUpdates=10`) で開始する。
 - burst の `START / CANDIDATE / ACCEPT / REJECT / STOP / SKIPPED_COOLDOWN / UNAVAILABLE / SECURITY_ERROR` を debug event で記録し、空欄区間が「要求未発行」か「低精度棄却」かを後から区別できる。
 
 ### 2.2 GPS 取得間隔の 3 段制御
@@ -17,10 +17,10 @@ GpsPressureLogger の現行ハイブリッド状態管理（`trK / stK / w-statu
 - `W1` 中: `gpsWalkIntervalMs=5秒`
 - それ以外: `gpsStableInitialMs=5秒` から `gpsStretchStepMs=5秒` 刻みで `gpsStretchMaxMs=30秒` まで線形に伸ばす
 - 伸長カウンタは「直前スロットの主記録に位置があり、`gpsAccuracy <= 80m`」の場合だけ進める。欠損または低精度ではカウンタを 0 に戻し、5 秒からやり直す。
-- `trK=ON` または `STK4` 検知時はカウンタを 0 に戻し、加速から外れた直後も 5 秒から再開する。
+- `trK4` または `STK4` 検知時はカウンタを 0 に戻し、加速から外れた直後も 5 秒から再開する。
 
 ### 2.3 定速領域の確定とバックフィル
-- `(STK1 or STK2) and W2` の区間を `ConstantRegionTracker` が定速領域として保持し、終了時に直線近似で `STAY / CONSTANT_MOVE` を確定する。
+- `W2` の区間を `ConstantRegionTracker` が定速領域として保持し、終了時に直線近似で `STAY / CONSTANT_MOVE` を確定する。
 - 確定後に `LoggingService` が当該区間の既存 `MotionSample` を読み直して `confirmedMode` と定速領域情報をバックフィルする。Room DB は即時、ローカル motion CSV は debounce / バッチ単位で書き換え（`CSV_MOTION_REWRITE_DEBOUNCE_MS=60秒`、`CSV_MOTION_REWRITE_MAX_PENDING_SAMPLES=500件`）。
 
 ### 2.4 W1 時の GPS 速度 / 歩数速度比較
@@ -41,7 +41,7 @@ GpsPressureLogger の現行ハイブリッド状態管理（`trK / stK / w-statu
 
 ### 4.2 地図表示
 - `STAY` を境界に分けた移動チャンクごとにローカルメートル投影 + tension 付き Catmull-Rom スプライン (tension=0.55) で補間し、`>` 進行方向マーカーは画面上の折れ線距離に沿って一定間隔でサンプリングする。
-- `STAY` 区間は保存済み `ConstantRegionStayLat/Lon` を使って 1 点へ畳み、`CONSTANT_MOVE` は記録 GPS 点列をそのまま描く（直線近似 `g(t)` 上への再配置はしない）。
+- `DEVICE_STILL / STOPPED` の連続停止領域は代表点 1 点へ畳む。旧ログ互換として `STAY` 区間も保存済み `ConstantRegionStayLat/Lon` を使って 1 点へ畳み、`CONSTANT_MOVE` は記録 GPS 点列をそのまま描く（直線近似 `g(t)` 上への再配置はしない）。
 - 表示用 GPS 系列だけを対象に `復帰バースト / 偽クラスタ滞在 / 停止標準化 / GPS 平準化` の 4 段補正を適用し、Room と CSV の raw GPS は変更しない。
 
 ## 5. 総評

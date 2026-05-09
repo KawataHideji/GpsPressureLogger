@@ -448,6 +448,15 @@ def assign_display_modes(rows, events, motion_samples=None):
         normalized = str(raw).strip().upper()
         return None if normalized in ("NONE", "NULL", "") else normalized
 
+    def event_int_metric(message, name):
+        match = re.search(rf"\b{re.escape(name)}=(-?\d+)", message)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
     def provisional_mode_from_new_state(sample, region_kind):
         """Android provisionalModeFromNewState の Python 版（allowOpenRegionFallback=True）。
         lastConfirmedIndex 以降の未確定サンプルから暫定モードを推定する。"""
@@ -491,6 +500,7 @@ def assign_display_modes(rows, events, motion_samples=None):
             mode_states.append({
                 "timestamp": sample["Timestamp"],
                 "mode": display_mode,
+                "recheck_walking": False,
                 "region_kind": region_kind,
                 "start_lat": sample.get("ConstantRegionStartLat"),
                 "start_lon": sample.get("ConstantRegionStartLon"),
@@ -506,6 +516,7 @@ def assign_display_modes(rows, events, motion_samples=None):
                 mode_states.append({
                     "timestamp": sample["Timestamp"],
                     "mode": prov,
+                    "recheck_walking": False,
                     "region_kind": region_kind,
                     "start_lat": sample.get("ConstantRegionStartLat"),
                     "start_lon": sample.get("ConstantRegionStartLon"),
@@ -514,6 +525,34 @@ def assign_display_modes(rows, events, motion_samples=None):
                     "stay_lat": sample.get("ConstantRegionStayLat"),
                     "stay_lon": sample.get("ConstantRegionStayLon"),
                 })
+
+    motion_tail_timestamp = max((sample["Timestamp"] for sample in motion_samples), default=None)
+    for event in events:
+        if motion_tail_timestamp is not None and event["timestamp"] <= motion_tail_timestamp:
+            continue
+        match = MODE_CONFIRMED_PATTERN.match(event["message"])
+        if not match:
+            continue
+        confirmed_mode = normalize_mode(match.group(2)) or "UNKNOWN"
+        display_mode = confirmed_mode
+        if confirmed_mode == "WALKING":
+            display_mode = resolve_display_walking_mode({
+                "Timestamp": event["timestamp"],
+                "StepDeltaWindow": event_int_metric(event["message"], "stepDelta9s"),
+            }, None)
+        mode_states.append({
+            "timestamp": event["timestamp"],
+            "mode": display_mode,
+            "recheck_walking": confirmed_mode == "WALKING",
+            "region_kind": None,
+            "start_lat": None,
+            "start_lon": None,
+            "end_lat": None,
+            "end_lon": None,
+            "stay_lat": None,
+            "stay_lon": None,
+        })
+    mode_states.sort(key=lambda state: state["timestamp"])
 
     # ── ModeState を rows にキャリーフォワードで適用 ────────────────────────────
     # Android buildDisplayPoints の while ループキャリーフォワード相当
@@ -526,11 +565,13 @@ def assign_display_modes(rows, events, motion_samples=None):
     current_end_lon = None
     current_stay_lat = None
     current_stay_lon = None
+    current_recheck_walking = False
 
     for row in rows:
         while state_index < len(mode_states) and mode_states[state_index]["timestamp"] <= row["Timestamp"]:
             st = mode_states[state_index]
             current_mode = st["mode"]
+            current_recheck_walking = st.get("recheck_walking", False)
             current_region_kind = st["region_kind"]
             current_start_lat = st["start_lat"]
             current_start_lon = st["start_lon"]
@@ -539,7 +580,13 @@ def assign_display_modes(rows, events, motion_samples=None):
             current_stay_lat = st["stay_lat"]
             current_stay_lon = st["stay_lon"]
             state_index += 1
-        row["DisplayMode"] = current_mode
+        if current_mode == "WALKING" and current_recheck_walking:
+            row["DisplayMode"] = resolve_display_walking_mode({
+                "Timestamp": row["Timestamp"],
+                "StepDeltaWindow": None,
+            }, current_region_kind)
+        else:
+            row["DisplayMode"] = current_mode
         row["ConstantRegionKind"] = current_region_kind
         row["ConstantRegionStartLat"] = current_start_lat
         row["ConstantRegionStartLon"] = current_start_lon
@@ -547,34 +594,6 @@ def assign_display_modes(rows, events, motion_samples=None):
         row["ConstantRegionEndLon"] = current_end_lon
         row["ConstantRegionStayLat"] = current_stay_lat
         row["ConstantRegionStayLon"] = current_stay_lon
-
-    # デバッグ情報を出力
-    debug_info = {
-        "summary": {
-            "total_rows": len(rows),
-            "has_motion_samples": True,
-            "motion_sample_count": len(motion_samples),
-            "mode_states_count": len(mode_states),
-            "last_confirmed_index": last_confirmed_index,
-        },
-        "rows_sample": [],
-        "transitions": []
-    }
-
-    last_mode = None
-    for i, r in enumerate(rows):
-        mode = r.get("DisplayMode")
-        kind = str(r.get("ConstantRegionKind") or "NONE").upper()
-        if i < 50:
-            debug_info["rows_sample"].append({"idx": i, "ts": r["dt"], "mode": mode, "kind": kind})
-        if mode != last_mode:
-            debug_info["transitions"].append({"idx": i, "ts": r["dt"], "from": last_mode, "to": mode, "kind": kind})
-            last_mode = mode
-
-    debug_path = SCRIPT_DIR / "debug_aggregation.json"
-    with debug_path.open("w", encoding="utf-8") as f:
-        json.dump(debug_info, f, ensure_ascii=False, indent=2)
-    print(f"[Debug] Aggregation log saved to {debug_path}")
 
     return rows
 
@@ -989,7 +1008,7 @@ def build_mode_data(rows, events=None, motion_samples=None):
     graph_rows = clone_rows(rows)
     map_rows = [dict(row) for row in rows if row["GpsValid"]]
     state_labels = build_state_labels(map_rows, motion_samples or [])
-    trk_labels = build_trk_labels(map_rows, motion_samples or [])
+    trk_labels = build_trk_labels(map_rows, motion_samples or [], events or [])
     return {
         "labels": [row["dt"][5:] for row in graph_rows],
         "timestamps": [row["Timestamp"] for row in graph_rows],
@@ -1009,7 +1028,7 @@ def build_corrected_mode_data(rows, events=None, motion_samples=None):
     corrected = get_processed_graph_mode(rows)
     corrected_map_rows = map_filter_outliers(rows)
     corrected["stateLabels"] = build_state_labels(corrected_map_rows, motion_samples or [])
-    corrected["trkLabels"] = build_trk_labels(corrected_map_rows, motion_samples or [])
+    corrected["trkLabels"] = build_trk_labels(corrected_map_rows, motion_samples or [], events or [])
     return corrected
 
 
@@ -1205,22 +1224,51 @@ def build_state_labels(rows, motion_samples):
     return labels
 
 
-def build_trk_labels(rows, motion_samples):
-    if not rows or not motion_samples:
+def build_trk_labels(rows, motion_samples, events=None):
+    if not rows:
         return []
     located_rows = [row for row in rows if row["GpsValid"]]
     if not located_rows:
         return []
     labels = []
     prev_trk = None
-    for sample in sorted(motion_samples, key=lambda item: item["Timestamp"]):
+    sorted_motion_samples = sorted(motion_samples, key=lambda item: item["Timestamp"])
+
+    def normalized_stk(value):
+        text = (value or "").strip().upper()
+        if text in ("STK4", "K4"):
+            return "STK4"
+        if text in ("STK2", "K2", "K2_K3"):
+            return "STK2"
+        if text in ("STK1", "K1"):
+            return "STK1"
+        return None
+
+    def nearest_motion_stk(timestamp_ms):
+        if not sorted_motion_samples:
+            return None
+        nearest = min(sorted_motion_samples, key=lambda sample: abs(sample["Timestamp"] - timestamp_ms))
+        return normalized_stk(nearest.get("KStatus"))
+
+    def event_stk(message, timestamp_ms):
+        match = re.search(r"\bstK=([A-Za-z0-9_]+)", message)
+        if match:
+            return normalized_stk(match.group(1))
+        return nearest_motion_stk(timestamp_ms)
+
+    def is_trk4(value):
+        text = (value or "").strip().upper()
+        return text in ("TRK4", "ON")
+
+    for sample in sorted_motion_samples:
         trk = (sample.get("TrKStatus") or "").strip().upper() or None
+        stk = normalized_stk(sample.get("KStatus"))
         if trk is not None and trk != prev_trk:
             nearest = display_location_at(located_rows, sample["Timestamp"])
             if nearest is not None:
                 lat = nearest.get("Lat")
                 lon = nearest.get("Lon")
-                if lat is not None and lon is not None and trk == "ON":
+                if lat is not None and lon is not None and is_trk4(trk) and stk != "STK4":
                     labels.append({
                         "lat": lat,
                         "lon": lon,
@@ -1230,6 +1278,31 @@ def build_trk_labels(rows, motion_samples):
                     })
         if trk is not None:
             prev_trk = trk
+    for event in events or []:
+        message = event.get("message") or ""
+        if "TRK_GPS_IMMEDIATE" not in message or not re.search(r"\btrK=(ON|TRK4)\b", message):
+            continue
+        timestamp = event.get("timestamp")
+        ts_match = re.search(r"\bts=(\d+)", message)
+        if ts_match:
+            timestamp = int(ts_match.group(1))
+        stk = event_stk(message, timestamp)
+        if stk == "STK4":
+            continue
+        nearest = display_location_at(located_rows, timestamp)
+        if nearest is None:
+            continue
+        lat = nearest.get("Lat")
+        lon = nearest.get("Lon")
+        if lat is None or lon is None:
+            continue
+        labels.append({
+            "lat": lat,
+            "lon": lon,
+            "timestamp": timestamp,
+            "text": "tON",
+            "bgColor": STATE_LABEL_COLOR_TRK_ON,
+        })
     return dedupe_nearby_labels(labels, min_distance_m=35.0, min_time_ms=20 * 60_000)
 
 
@@ -1369,25 +1442,34 @@ def filter_motion_samples_by_date(motion_samples, date_key):
     return [dict(sample) for sample in motion_samples if timestamp_to_jst_date_key(sample["Timestamp"]) == date_key]
 
 
-def build_mode_data_by_date(rows, events, motion_samples=None):
+def choose_initial_date_key(date_keys, selected_date_key):
+    if selected_date_key and selected_date_key in date_keys:
+        return selected_date_key
+    if len(date_keys) > 1:
+        # date_keys = ["all", "2025-xx-xx", ...] — 末尾が最新日
+        return date_keys[-1]
+    return date_keys[0] if date_keys else "all"
+
+
+def build_mode_data_for_date(rows, events, motion_samples, initial_date_key):
     motion_samples = motion_samples or []
-    date_keys = build_date_key_options(rows)
-    mode_data = {}
-    events_by_date = {"all": events[-50:]}
-    for date_key in date_keys:
-        date_rows = filter_rows_by_date(rows, date_key)
-        date_motion_samples = filter_motion_samples_by_date(motion_samples, date_key)
-        date_events = filter_events_by_date(events, date_key)
-        mode_data[date_key] = {
-            "raw": build_mode_data(date_rows, date_events, date_motion_samples),
-            "corrected": build_corrected_mode_data(date_rows, date_events, date_motion_samples),
-        }
-        events_by_date[date_key] = date_events[-50:]
-    mode_data["all"] = {
-        "raw": build_mode_data(rows, events, motion_samples),
-        "corrected": build_corrected_mode_data(rows, events, motion_samples),
-    }
-    return mode_data, events_by_date, ["all", *date_keys]
+    if initial_date_key == "all":
+        selected_rows = rows
+        selected_events = events
+        selected_motion_samples = motion_samples
+    else:
+        selected_rows = filter_rows_by_date(rows, initial_date_key)
+        selected_events = filter_events_by_date(events, initial_date_key)
+        selected_motion_samples = filter_motion_samples_by_date(motion_samples, initial_date_key)
+    return (
+        {
+            initial_date_key: {
+                "raw": build_mode_data(selected_rows, selected_events, selected_motion_samples),
+                "corrected": build_corrected_mode_data(selected_rows, selected_events, selected_motion_samples),
+            }
+        },
+        {initial_date_key: selected_events[-50:]},
+    )
 
 
 def build_dashboard_payload(mode_data, events_by_date, summary, initial_correction, date_keys, initial_date_key):
@@ -2042,7 +2124,6 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
         }}
         return {{ ...p, lat: latSum / count, lon: lonSum / count }};
       }});
-      console.log(`[Smooth] Applied moving average. Skipped ${{skipCount}} points.`);
       return result;
     }}
 
@@ -2438,7 +2519,6 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
 
     function collapseConstantRegions(points) {{
       if (points.length === 0) return [];
-      console.log(`[Collapse] UI analysis starting for ${{points.length}} points...`);
 
       const isStationaryMode = (m) => {{
         const sm = (m || '').toUpperCase().trim();
@@ -2464,9 +2544,9 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
         const mode = point.displayMode;
 
         // Android collapseConstantRegions に準拠:
-        // constantRegionKind が STAY の点のみ集約する。
-        // DEVICE_STILL/STOPPED モードでも kind が null/NONE なら通常の点として通過させる。
-        const shouldCollapseAsStay = isStayKind(kind);
+        // DEVICE_STILL / STOPPED が連続する区間は、交互でも停止領域として 1 点へ集約する。
+        // 旧ログ互換として ConstantRegionKind=STAY だけの区間も同じ代表点へ集約する。
+        const shouldCollapseAsStay = isStationaryMode(mode) || isStayKind(kind);
 
         if (!shouldCollapseAsStay && isNoneKind(kind)) {{
           collapsed.push(point);
@@ -2476,11 +2556,11 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
 
         let endExclusive = index + 1;
         if (shouldCollapseAsStay) {{
-          // STAY kind が続く間を一括集約
           while (endExclusive < points.length) {{
             const nextP = points[endExclusive];
             const nextKind = nextP.constantRegionKind;
-            if (!isStayKind(nextKind)) break;
+            const nextMode = nextP.displayMode;
+            if (!isStationaryMode(nextMode) && !isStayKind(nextKind)) break;
             endExclusive += 1;
           }}
 
@@ -2496,13 +2576,11 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
             ...lastPoint,
             lat, lon,
             isStayAggregate: true,
-            displayMode: lastPoint.displayMode
+            displayMode: segment.every(p => p.displayMode === 'DEVICE_STILL') ? 'DEVICE_STILL' : 'STOPPED'
           }});
 
           if (segment.some(p => p.displayMode === 'DEVICE_STILL')) deviceStillSegments++;
           else stoppedSegments++;
-
-          console.log(`[Collapse] Aggregate STAY: points=${{segment.length}}, lat=${{lat.toFixed(6)}}`);
         }} else if (kind === 'CONSTANT_MOVE') {{
           while (endExclusive < points.length && points[endExclusive].constantRegionKind === kind) {{
             endExclusive += 1;
@@ -3399,8 +3477,19 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
       updateEventList();
     }}
 
+    function handleDateKeyChange() {{
+      const dateKey = dateKeySelect.value;
+      if (payload.modesByDate[dateKey]) {{
+        renderAll();
+        return;
+      }}
+      if (window.parent && window.parent !== window) {{
+        window.parent.postMessage({{ type: 'gpspl-date-change', dateKey }}, '*');
+      }}
+    }}
+
     // ---- イベントリスナー ----
-    dateKeySelect.addEventListener('change', renderAll);
+    dateKeySelect.addEventListener('change', handleDateKeyChange);
     correctionSelect.addEventListener('change', renderAll);
 
     mapTimeFocusSelect.addEventListener('change', () => {{
@@ -3440,6 +3529,24 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
 """
 
 
+def load_dashboard_sources(csv_path_arg: str | None = None, motion_csv_path_arg: str | None = None) -> dict:
+    csv_path = resolve_csv_path(csv_path_arg)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV not found: {csv_path}")
+
+    rows, events = load_backup(csv_path)
+    motion_csv_path_resolved = resolve_motion_csv_path(csv_path, motion_csv_path_arg)
+    motion_samples, used_motion_path = load_motion_samples(motion_csv_path_resolved)
+    rows = assign_display_modes(rows, events, motion_samples)
+    return {
+        "csv_path": csv_path,
+        "motion_csv_path": used_motion_path,
+        "rows": rows,
+        "events": events,
+        "motion_samples": motion_samples,
+    }
+
+
 def build_dashboard(
     *,
     csv_path_arg: str | None = None,
@@ -3450,6 +3557,7 @@ def build_dashboard(
     correction: str = "corrected",
     selected_date_key: str | None = None,
     tile_url_template: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    source_data: dict | None = None,
     summary_only: bool = False,
     open_browser: bool = False,
 ) -> dict:
@@ -3463,15 +3571,13 @@ def build_dashboard(
         available_date_keys: date_keys の別名（互換性）
         initial_date_key: 初期選択の日付キー
     """
-    csv_path = resolve_csv_path(csv_path_arg)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"CSV not found: {csv_path}")
-
-    rows, events = load_backup(csv_path)
-
-    motion_csv_path_resolved = resolve_motion_csv_path(csv_path, motion_csv_path_arg)
-    motion_samples, used_motion_path = load_motion_samples(motion_csv_path_resolved)
-    rows = assign_display_modes(rows, events, motion_samples)
+    if source_data is None:
+        source_data = load_dashboard_sources(csv_path_arg, motion_csv_path_arg)
+    csv_path = source_data["csv_path"]
+    used_motion_path = source_data["motion_csv_path"]
+    rows = clone_rows(source_data["rows"])
+    events = [dict(event) for event in source_data["events"]]
+    motion_samples = [dict(sample) for sample in source_data["motion_samples"]]
 
     session_info = None
     if view == "latest-session":
@@ -3479,15 +3585,9 @@ def build_dashboard(
 
     summary = summarize_rows(rows, events, csv_path, used_motion_path, session_info)
 
-    mode_data, events_by_date, date_keys = build_mode_data_by_date(rows, events, motion_samples)
-
-    if selected_date_key and selected_date_key in date_keys:
-        initial_date_key = selected_date_key
-    elif len(date_keys) > 1:
-        # date_keys = ["all", "2025-xx-xx", ...] — 末尾が最新日
-        initial_date_key = date_keys[-1]
-    else:
-        initial_date_key = date_keys[0] if date_keys else "all"
+    date_keys = ["all", *build_date_key_options(rows)]
+    initial_date_key = choose_initial_date_key(date_keys, selected_date_key)
+    mode_data, events_by_date = build_mode_data_for_date(rows, events, motion_samples, initial_date_key)
 
     payload_json = build_dashboard_payload(
         mode_data, events_by_date, summary, correction, date_keys, initial_date_key

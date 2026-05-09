@@ -82,12 +82,56 @@ def render_shell_html() -> str:
     .frame-wrap {
       background: var(--bg);
       padding: 0;
+      position: relative;
     }
     iframe {
       width: 100%;
       height: calc(100vh - 57px);
       border: 0;
       background: var(--bg);
+    }
+    .loading-overlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      place-items: center;
+      background: rgba(8, 13, 24, 0.72);
+      backdrop-filter: blur(2px);
+      z-index: 5;
+    }
+    .loading-overlay.active {
+      display: grid;
+    }
+    .loading-panel {
+      min-width: 280px;
+      padding: 18px 22px;
+      border: 1px solid rgba(95, 160, 255, 0.42);
+      border-radius: 10px;
+      background: rgba(18, 32, 58, 0.96);
+      box-shadow: 0 16px 45px rgba(0, 0, 0, 0.35);
+      color: var(--text);
+      text-align: center;
+    }
+    .loading-spinner {
+      width: 28px;
+      height: 28px;
+      margin: 0 auto 12px;
+      border: 3px solid rgba(154, 179, 218, 0.28);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    .loading-title {
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .loading-text {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
     }
   </style>
 </head>
@@ -112,16 +156,25 @@ def render_shell_html() -> str:
   </div>
   <div class="frame-wrap">
     <iframe id="dashboardFrame" title="GpsPressureLogger dashboard"></iframe>
+    <div id="loadingOverlay" class="loading-overlay">
+      <div class="loading-panel">
+        <div class="loading-spinner"></div>
+        <div class="loading-title">読み込み中</div>
+        <div id="loadingText" class="loading-text">データを処理しています...</div>
+      </div>
+    </div>
   </div>
   <script>
     const metaText = document.getElementById('metaText');
-    const frame = document.getElementById('dashboardFrame');
+    let frame = document.getElementById('dashboardFrame');
     const reloadButton = document.getElementById('reloadButton');
     const openButton = document.getElementById('openButton');
     const openMotionButton = document.getElementById('openMotionButton');
     const viewSelect = document.getElementById('viewSelect');
     const dateSelect = document.getElementById('dateSelect');
     const correctionSelect = document.getElementById('correctionSelect');
+    const loadingOverlay = document.getElementById('loadingOverlay');
+    const loadingText = document.getElementById('loadingText');
 
     function setBusy(isBusy, text) {
       reloadButton.disabled = isBusy;
@@ -132,7 +185,9 @@ def render_shell_html() -> str:
       correctionSelect.disabled = isBusy;
       if (text) {
         metaText.textContent = text;
+        loadingText.textContent = text;
       }
+      loadingOverlay.classList.toggle('active', isBusy);
     }
 
     function renderDateOptions(dateKeys, selectedDateKey) {
@@ -150,8 +205,11 @@ def render_shell_html() -> str:
     }
 
     function applyResult(result) {
-      frame.removeAttribute('src');
-      frame.srcdoc = result.dashboard_html;
+      const nextFrame = frame.cloneNode(false);
+      nextFrame.addEventListener('load', () => setBusy(false), { once: true });
+      nextFrame.srcdoc = result.dashboard_html;
+      frame.replaceWith(nextFrame);
+      frame = nextFrame;
       viewSelect.value = result.view;
       correctionSelect.value = result.correction;
       renderDateOptions(result.date_keys || [], result.selected_date_key);
@@ -166,7 +224,6 @@ def render_shell_html() -> str:
         applyResult(result);
       } catch (error) {
         metaText.textContent = `初期化エラー: ${error}`;
-      } finally {
         setBusy(false);
       }
     }
@@ -178,7 +235,6 @@ def render_shell_html() -> str:
         applyResult(result);
       } catch (error) {
         metaText.textContent = `再読込エラー: ${error}`;
-      } finally {
         setBusy(false);
       }
     }
@@ -187,10 +243,13 @@ def render_shell_html() -> str:
       setBusy(true, 'CSVを開いています...');
       try {
         const result = await window.pywebview.api.open_csv_file();
-        if (result) applyResult(result);
+        if (result) {
+          applyResult(result);
+        } else {
+          setBusy(false);
+        }
       } catch (error) {
         metaText.textContent = `ファイルオープンエラー: ${error}`;
-      } finally {
         setBusy(false);
       }
     }
@@ -199,10 +258,13 @@ def render_shell_html() -> str:
       setBusy(true, '補助CSVを開いています...');
       try {
         const result = await window.pywebview.api.open_motion_csv_file();
-        if (result) applyResult(result);
+        if (result) {
+          applyResult(result);
+        } else {
+          setBusy(false);
+        }
       } catch (error) {
         metaText.textContent = `ファイルオープンエラー: ${error}`;
-      } finally {
         setBusy(false);
       }
     }
@@ -216,10 +278,18 @@ def render_shell_html() -> str:
         applyResult(result);
       } catch (error) {
         metaText.textContent = `日付変更エラー: ${error}`;
-      } finally {
         setBusy(false);
       }
     }
+
+    window.addEventListener('message', (event) => {
+      const data = event.data || {};
+      if (data.type !== 'gpspl-date-change') return;
+      const dateKey = data.dateKey;
+      if (!dateKey || dateSelect.value === dateKey) return;
+      dateSelect.value = dateKey;
+      onDateChange();
+    });
 
     reloadButton.addEventListener('click', reloadLatest);
     openButton.addEventListener('click', openCsv);

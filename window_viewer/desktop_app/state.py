@@ -22,6 +22,8 @@ class ViewerState:
     correction: str = "corrected"
     selected_date_key: str | None = None
     tile_proxy: TileProxyServer | None = None
+    source_cache_key: tuple | None = None
+    source_cache_data: dict | None = None
 
     def build(self) -> dict:
         html_output = self._next_html_output()
@@ -35,6 +37,7 @@ class ViewerState:
             correction=self.correction,
             selected_date_key=self.selected_date_key,
             tile_url_template=tile_url_template,
+            source_data=self._get_source_data(),
             summary_only=False,
             open_browser=False,
         )
@@ -70,3 +73,29 @@ class ViewerState:
             cache_dir = base_path.parent / "desktop_cache" / "tile_cache"
             self.tile_proxy = TileProxyServer(cache_dir=cache_dir)
         return self.tile_proxy
+
+    def _file_signature(self, path: Path | None) -> tuple | None:
+        if path is None:
+            return None
+        stat = path.stat()
+        return (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+
+    def _source_key(self) -> tuple:
+        csv_path = step3_visualize.resolve_csv_path(self.csv_path_arg)
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV not found: {csv_path}")
+        motion_path = step3_visualize.resolve_motion_csv_path(csv_path, self.motion_csv_path_arg)
+        return (
+            self._file_signature(csv_path),
+            self._file_signature(motion_path) if motion_path and motion_path.exists() else None,
+        )
+
+    def _get_source_data(self) -> dict:
+        key = self._source_key()
+        if key != self.source_cache_key or self.source_cache_data is None:
+            self.source_cache_data = step3_visualize.load_dashboard_sources(
+                self.csv_path_arg,
+                self.motion_csv_path_arg,
+            )
+            self.source_cache_key = key
+        return self.source_cache_data

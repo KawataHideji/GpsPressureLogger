@@ -12,7 +12,7 @@ class MotionStateManager(
     private val paramsProvider: MotionStateParamsProvider = StaticMotionStateParamsProvider(),
     private val onStepCountUp: (delta: Int, total: Int, timestampMs: Long) -> Unit = { _, _, _ -> },
     private val onStepReset: () -> Unit = {},
-    private val onTrKChanged: (TrKSnapshot) -> Unit = {}
+    private val onTrKChanged: (TrKTransitionSnapshot) -> Unit = {}
 ) {
     private val stepManager = StepManager(
         paramsProvider = paramsProvider,
@@ -96,11 +96,11 @@ class MotionStateManager(
         )
         val activeRegionEstimate = constantRegionTracker.latestActiveEstimate()
         val walkingSpeed = createWalkingSpeedSnapshot(timestampMs, wSnapshot)
-        val accelerationTriggered = accelManager.consumeTrKImmediateForSlot()
+        val trKImmediate = accelManager.consumeTrKImmediateForSlot()
         val policyGpsDecision = gpsSamplingPolicy.update(
             stK = stKSnapshot.status,
             wStatus = wSnapshot.status,
-            accelerationTriggered = accelerationTriggered
+            accelerationTriggered = trKImmediate != null
         )
         val finalModeConfirmed = isFinalModeConfirmed(
             stK = stKSnapshot.status,
@@ -127,6 +127,7 @@ class MotionStateManager(
         return MotionStateSnapshot(
             timestampMs = timestampMs,
             trK = trKSnapshot,
+            trKImmediate = trKImmediate,
             stK = stKSnapshot,
             wStatus = wSnapshot,
             walkingSpeed = walkingSpeed,
@@ -178,7 +179,6 @@ class MotionStateManager(
         activeRegionEstimate?.kind == ConstantRegionKind.STAY && stK == StKStatus.STK1 -> GpsAggregationMode.DEVICE_STILL
         activeRegionEstimate?.kind == ConstantRegionKind.STAY -> GpsAggregationMode.STOPPED
         activeRegion && stK == StKStatus.STK1 -> GpsAggregationMode.DEVICE_STILL
-        activeRegion -> GpsAggregationMode.STOPPED
         stK == StKStatus.STK1 -> GpsAggregationMode.DEVICE_STILL
         stK == StKStatus.STK2 -> GpsAggregationMode.STOPPED
         else -> GpsAggregationMode.UNKNOWN

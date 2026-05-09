@@ -645,7 +645,7 @@ object GpsUtil {
         val timestamp: Long,
         val distRatio: Float,
         val displayMode: MovementDetector.Mode = MovementDetector.Mode.UNKNOWN,
-        val isStop: Boolean = false, // STAY 領域を stay point 1 点へ畳んだ代表点
+        val isStop: Boolean = false, // DEVICE_STILL / STOPPED 領域を代表点へ畳んだ停止点
         val stopCount: Int = 0,
         val isGapBreak: Boolean = false
     )
@@ -1015,7 +1015,8 @@ object GpsUtil {
                 timestamp = point.timestamp,
                 distRatio = (cumulativeDistances[index] / totalDistance).toFloat(),
                 displayMode = point.displayMode,
-                isStop = point.constantRegionKind == ConstantRegionKind.STAY
+                isStop = isStationaryDisplayMode(point.displayMode) ||
+                    point.constantRegionKind == ConstantRegionKind.STAY
             )
         }
     }
@@ -1799,6 +1800,9 @@ object GpsUtil {
             runCatching { ConstantRegionKind.valueOf(it) }.getOrNull()
         }?.takeUnless { it == ConstantRegionKind.NONE }
 
+    private fun isStationaryDisplayMode(mode: MovementDetector.Mode): Boolean =
+        mode == MovementDetector.Mode.DEVICE_STILL || mode == MovementDetector.Mode.STOPPED
+
     private fun collapseConstantRegions(points: List<DisplayPoint>): List<DisplayPoint> {
         if (points.isEmpty()) return emptyList()
         val collapsed = mutableListOf<DisplayPoint>()
@@ -1806,6 +1810,33 @@ object GpsUtil {
         while (index < points.size) {
             val point = points[index]
             val kind = point.constantRegionKind
+            if (isStationaryDisplayMode(point.displayMode)) {
+                var endExclusive = index + 1
+                while (
+                    endExclusive < points.size &&
+                    isStationaryDisplayMode(points[endExclusive].displayMode)
+                ) {
+                    endExclusive += 1
+                }
+                val segment = points.subList(index, endExclusive)
+                val keepPoint = segment.last()
+                val stayLat = keepPoint.constantRegionStayLat ?: segment.map { it.lat }.average()
+                val stayLon = keepPoint.constantRegionStayLon ?: segment.map { it.lon }.average()
+                val collapsedMode =
+                    if (segment.all { it.displayMode == MovementDetector.Mode.DEVICE_STILL }) {
+                        MovementDetector.Mode.DEVICE_STILL
+                    } else {
+                        MovementDetector.Mode.STOPPED
+                    }
+                collapsed += keepPoint.copy(
+                    lat = stayLat,
+                    lon = stayLon,
+                    displayMode = collapsedMode
+                )
+                index = endExclusive
+                continue
+            }
+
             if (kind == null || kind == ConstantRegionKind.NONE) {
                 collapsed += point
                 index += 1
@@ -2175,7 +2206,7 @@ object GpsUtil {
 
     /**
      * 地図上に重ねて表示する状態ラベルの1件。
-     * @param text  ラベル文字列（"K1"/"K2"/"K4"/"W1"/"W2"/"STAY"/"CMOV"）
+     * @param text  ラベル文字列（"K1"/"K2"/"K4"/"W1"/"W2"/"STAY"/"CMOV"/"tON"）
      * @param bgColor バッジ背景色（STATE_LABEL_COLOR_* 定数）
      */
     data class StateLabel(
@@ -2235,9 +2266,12 @@ object GpsUtil {
     }
 
     /**
-     * MotionSample の trK 遷移点を GPS 座標と紐付け、トリガーラベル一覧を返す。
+     * MotionSample の trK 遷移点または GPS 即時取得記録を GPS 座標と紐付け、
+     * トリガーラベル一覧を返す。
      *
-     * trK は GPS 即時取得 / 短周期復帰の制御用トリガーなので、ON 変化点だけを表示する。
+     * trK は GPS 即時取得 / 短周期復帰の制御用トリガーなので、stK4 ではない
+     * trK4 変化点または GpsImmediate=1 だけを tON として表示する。
+     * stK4 は AC ラベル側に任せる。
      */
     fun buildTrkLabels(entries: List<LogEntry>, motionSamples: List<MotionSample>): List<StateLabel> {
         if (entries.isEmpty() || motionSamples.isEmpty()) return emptyList()
@@ -2250,11 +2284,14 @@ object GpsUtil {
 
         for (sample in sorted) {
             val trK = parseTrKStatus(sample.trKStatus)
-            if (trK != null && trK != prevTrK) {
+            val stK = StKStatus.fromStored(sample.kStatus)
+            val trK4Changed = trK != null && trK != prevTrK && trK == TrKStatus.TRK4
+            val gpsImmediate = sample.gpsImmediate == true
+            if ((trK4Changed || gpsImmediate) && stK != StKStatus.STK4) {
                 val location = displayLocationAt(locatedEntries, sample.timestamp)
                 val lat = location?.first
                 val lon = location?.second
-                if (lat != null && lon != null && trK == TrKStatus.ON) {
+                if (lat != null && lon != null) {
                     labels += StateLabel(
                         lat = lat,
                         lon = lon,
@@ -2351,9 +2388,5 @@ object GpsUtil {
         else -> STATE_LABEL_COLOR_W2
     }
 
-    private fun parseTrKStatus(value: String?): TrKStatus? = when (value) {
-        "ON" -> TrKStatus.ON
-        "OFF" -> TrKStatus.OFF
-        else -> null
-    }
+    private fun parseTrKStatus(value: String?): TrKStatus? = TrKStatus.fromStored(value)
 }

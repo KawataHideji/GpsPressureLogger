@@ -37,6 +37,12 @@ interface LogDao {
     @Query("SELECT * FROM log_entries WHERE timestamp >= :since ORDER BY timestamp DESC")
     suspend fun getEntriesSinceOnce(since: Long): List<LogEntry>
 
+    @Query("SELECT COUNT(*) FROM log_entries WHERE timestamp >= :since")
+    suspend fun countSince(since: Long): Int
+
+    @Query("SELECT * FROM log_entries WHERE timestamp > :afterTimestamp ORDER BY timestamp ASC LIMIT :limit")
+    suspend fun getPageAfter(afterTimestamp: Long, limit: Int): List<LogEntry>
+
     /** 指定タイムスタンプ以降の全レコードをFlowで取得（古い順） */
     @Query("SELECT * FROM log_entries WHERE timestamp >= :since ORDER BY timestamp ASC")
     fun getEntriesSinceAsc(since: Long): Flow<List<LogEntry>>

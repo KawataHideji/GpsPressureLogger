@@ -1,6 +1,6 @@
 # 作業リスト
 
-最終更新: 2026-04-25
+最終更新: 2026-05-06
 
 ## 2026-04-10
 
@@ -598,3 +598,30 @@
 - Windows viewer の `>` が `Maximum call stack size exceeded` で出なくなった原因は、`gpsGapBreak` で分割した境界点を次 chunk に再投入し、同じ境界点で再帰し続けていたことだった。境界点を次 chunk へ入れないよう修正し、矢印計算は線描画後に実行して例外時も線自体が消えないようにした。調査用に一時追加した画面デバッグ表示と `viewer_debug_log.txt` 出力は削除済み。
 - この復旧で誤って Windows viewer の `>` サイズを過去の暫定値 `font-size 30px / iconSize 44px` に戻したため、再度 `font-size 16px / iconSize 16px / iconAnchor 8px` へ戻した。今後、表示復旧や glyph 変更をしても、このサイズ調整値を変更しない。
 - `STK4` を拾いやすくするため、`MotionStateParams.stK4AvgThreshold` を `0.15` から `0.08` へ下げ、`stK4RatioThreshold` を `0.8` から `0.75` へ変更した。3 秒窓の平均水平加速度 `StKAvg >= 0.08` かつ方向性比率 `StKRatio <= 0.75` で `STK4` とする。
+- Windows viewer は desktop shell が選択日ごとの dashboard HTML を再生成する構造で、内側 dashboard の日付セレクトだけを変えても別日のデータは payload に無い。内側の日付変更は `postMessage(type='gpspl-date-change')` で shell へ通知し、shell 側の `set_date()` 経由で HTML を再生成するようにした。
+- Windows viewer の iframe 更新で、生成済み dashboard HTML ファイル URL を `frame.src` に設定する方式は pywebview 環境でグラフ・地図が表示されなくなるため採用しない。API は `dashboard_html` を返し、shell は iframe 要素自体を作り直して `srcdoc` に入れる。単純な `srcdoc` 再代入ではなく iframe を置換することで、日付変更時も確実に dashboard を初期化し直す。
+- Windows viewer はログ解析・dashboard 再生成・iframe 初期化に時間がかかるため、shell に読み込み中 overlay を追加した。日付変更、最新再読込、CSV オープン中は toolbar の状態文言と同じメッセージを画面中央にも表示し、iframe の `load` 完了まで操作を disabled にする。
+- Windows viewer のローカル tile proxy で、地図移動や再読み込み中に WebView 側がタイル接続を閉じた場合の `ConnectionAbortedError` / `BrokenPipeError` / `ConnectionResetError` は正常な切断として握りつぶし、コンソールに traceback を出さないようにした。通常起動時に出ていた集計デバッグ JSON 出力も削除した。
+- Windows viewer の日付変更高速化として、同じ CSV / 補助 CSV の再表示では `ViewerState` が読み込み済みソースをファイルサイズ・mtime 付きでキャッシュするようにした。また、dashboard 生成時は全日付分の `mode_data` を作らず、選択日（または `all`）だけを `build_mode_data_for_date()` で生成する。地図の平準化・スプライン・矢印・マーカー描画ロジックは変更していない。
+- Android 地図は `MapViewModel` の `entries` と `motionSamples` を別々に `StateFlow` として公開せず、対象日の DB 読み込み、表示用 entries 補正、motion samples を 1 つの `MapUiState` で emit するようにした。これにより日付変更時に entries だけ到着して描画し、motion samples 到着後に再描画する二段階更新を避ける。`MapScreen` の無条件 `mapView.invalidate()` もやめ、overlay を更新した分岐だけで invalidate する。
+- 最新主CSVに対して補助CSVが古く、選択日に motion sample が無い場合、viewer が補助CSV末尾の状態を前方補完してしまい、5/7 の軌跡がほぼ `DEVICE_STILL` になって青/赤の線が消えていた。補助CSV末尾より新しい主CSV内 `# EVENT MODE_CONFIRMED` を fallback の mode state として取り込み、補助CSVが追いついていない日の `DisplayMode` を復元するようにした。
+- 上記 fallback では `MODE_CONFIRMED ... -> WALKING` をそのまま青表示していたため、電車移動中でも歩行判定イベントが多い区間が青く見えていた。Android の `displayModeFromConfirmedSample()` と同じく、fallback イベントの WALKING は速度再判定対象として扱い、イベント時刻と前方補完先の各 GPS 行で、直近 9 秒の GPS 速度が 10km/h 以上、または歩数推定速度との差が 5km/h 以上なら `VEHICLE` として表示する。
+- viewer の `trK` ラベルは補助 CSV の `TrKStatus` だけを見ていたため、補助 CSV が古く主 CSV に `TRK_GPS_IMMEDIATE ... trK=ON` だけがある最新日では、チェックしても `tON` が表示されなかった。主 CSV イベントも `tON` ラベルの fallback 入力として使い、既存の近接重複抑制でまとめるようにした。
+- 2026-05-07 実ログの `TRK_GPS_IMMEDIATE` を再解析し、`TrKRatio <= 0.65` かつ `TrKAvg < 0.28` を新しい trK ON 条件にした。`TrKAvgUpperThreshold=0.28` を `MotionStateParams` に追加し、`TRK_GPS_IMMEDIATE` ログにも上限値を出力する。
+- 電車の弱い速度変化も拾いやすくするため、`trKAvgThreshold` を `0.10` から `0.07` へ下げた。現行の trK ON 条件は `0.07 <= TrKAvg < 0.28` かつ `TrKRatio <= 0.65`。
+- `trK` 判定を、過去 2 秒の平均水平方向 `H` と直近 1 秒の `H` 方向射影へ変更した。`TrKAvg=average(Hk_i)` を符号付きで保存し、判定は `0.05 <= abs(TrKAvg) < 0.28`、射影値に逆符号なし、`TrKRatio=stddev(Hk_i)/abs(TrKAvg) <= 0.65` とする。
+
+## 2026-05-06（仕様書とコードの同期作業）
+
+- 仕様書とコードの同期チェックを実施し、`BootReceiver` が 5/6 時点で `LoggingService` を自動再開していないにもかかわらず、`functional_spec.md` / `design_doc.md` / `todo.md` に旧来の自動再開記述が残っていることを確認した。
+- `functional_spec.md` の 2.1 と 3.1 を更新し、「端末再起動とアプリ更新では `LoggingService` を自動再開しない」「`BootReceiver` は受信ログだけを残す」「サービス起動は利用者がアプリを開いた時のみ」と明記した。
+- `design_doc.md` の `BootReceiver` セクションを書き換え、Android のバックグラウンド foreground service 起動制限を理由として整理した。強制フラッシュ契機からも `BOOT_COMPLETED` / `MY_PACKAGE_REPLACED` を除き、未捕捉例外検知を追加した。
+- `design_doc.md` の `gpsStretchMaxMs` 表現を「現状コード固定値、UI から変更しない」に修正し、「初期値」表現で UI から変更できるかのように読める部分を整理した。
+- `data_spec.md` の `TrKAvg` 列の重複記載 2 行を 1 行へ整理した。`GpsImmediate` の保存形式（CSV `0/1/空欄`、Room `Boolean?`）を補足した。
+- `room_data_spec.md` の `motion_samples.gpsImmediate` に SQLite では `INTEGER` で `1/0/null` 保存と CSV 表現を補足した。
+- `import_export_spec.md` の 7 節「外部保存先の方針」を、想定ディレクトリ列挙から現実装どおり「アプリ常設ディレクトリは `GpsPressureLogger/{logs,metrics,debug}` のみ、手動 export とデバッグ共有は SAF で選んだ単一 URI に書く」へ整理した。
+- `research_report_gps_control.md` を旧 `MovementDetector` の確信度積分方式から、現行の `trK / stK / w-status / 定速領域` 体系へ全面刷新した。
+- `research_report.md` に OutOfMemoryError と未捕捉例外検知の調査メモを追加し、`installUnhandledExceptionLogger()` 経由のフラッシュと `# EVENT UNCAUGHT_EXCEPTION` 追記の流れを記録した。
+- `todo.md` を全面更新した。`BootReceiver` 自動再開関連の項目を削除し、サービス起動ログ確認項目を新運用向けに置き換えた。GPS 凍結復帰検知、GPS 欠損補間、状態イベントログのページ export、`stK4AvgThreshold=0.08` への変更、`OutOfMemoryError` の継続監視と原因切り分けなど、5/5-5/6 の追加実装に対応する確認項目を追加した。
+- 全ドキュメントの「最終更新」日付を 2026-05-06 に揃えた。
+- `SettingsRepository` から未使用の `KEY_INTERVAL_SEC` / `KEY_SENSOR_ONLY_INTERVAL_SEC` / `DEFAULT_INTERVAL_SEC` / `DEFAULT_SENSOR_ONLY_INTERVAL_SEC` / `intervalSec` Flow / `sensorOnlyIntervalSec` Flow / `setIntervalSec` / `setSensorOnlyIntervalSec` を削除した。あわせて `SettingsViewModel` の `intervalSec` StateFlow と `setIntervalSec` 関数も削除した（UI からの参照は無い）。

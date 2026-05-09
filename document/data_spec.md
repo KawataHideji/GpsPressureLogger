@@ -65,11 +65,11 @@ Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAv
 - `KAvg`: 3 秒スロット全体の 3 軸線形加速度を、可能なら世界座標（East / North / Up）へ変換したうえで軸ごとに平均し、その平均ベクトルのノルムを取った値。振動ではなく、スロット全体として方向性が残る加速・減速・旋回を捉えるために使う
 - `KScalarAvg`: 3 秒スロット全体の各サンプル加速度ノルム `|a_i|` の平均。動きの総量を表す
 - `KVariance`: 3 秒スロット全体の変換済み合成加速度ノルムの分散。平均加速ではなく、振動・揺れの大きさを捉えるために使う
-- `TrKStatus` / `TrKRawStatus`: 1 秒窓 `trK` の確定値 / raw 候補値。値は `ON / OFF`
+- `TrKStatus` / `TrKRawStatus`: 1 秒窓 `trK` の確定値 / raw 候補値。値は `TRK1 / TRK2_TRK3 / TRK4`。旧ログの `ON / OFF` は `TRK4 / TRK2_TRK3` として読む
 - `StKAvg`: 3 秒窓の平均水平加速度ベクトルの大きさ `k`。旧ヘッダ `KAvg` は import 互換として受け入れる
 - `StKRatio`: 3 秒窓の射影標準偏差比 `sigma / k`。旧ヘッダ `KDirectionalityRatio` は import 互換として受け入れる
-- `TrKAvg`: 1 秒窓の平均水平加速度ベクトルの大きさ `k`
-- `TrKRatio`: 1 秒窓の射影標準偏差比 `sigma / k`。`k` がほぼ 0 の場合など、ratio が成立しないときは空欄を記録する。旧ヘッダ `TrKDirectionalityRatio` は import 互換として受け入れる
+- `TrKAvg`: 過去 2 秒の平均水平方向 `H` へ、直近 1 秒の水平加速度サンプルを射影した値 `Hk_i` の平均。符号付きで記録し、判定では `abs(TrKAvg)` を使う
+- `TrKRatio`: 直近 1 秒の射影値 `Hk_i` の標準偏差比 `stddev(Hk_i) / abs(TrKAvg)`。`H` や ratio が成立しないときは空欄を記録する。旧ヘッダ `TrKDirectionalityRatio` は import 互換として受け入れる
 - `WStatus`: `W1 / W2`
 - `StepDeltaWindow`: `wWindowMs` 内の歩行イベント数 / 歩数増分合計。`WStatus=W1` は `StepDeltaWindow >= wStepDeltaThreshold` かつ最終歩行イベントから `walkingThresholdMs` 以内で判定する
 - `GpsIntervalMs`: 新状態管理が決めた GPS 要求間隔
@@ -87,7 +87,7 @@ Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRate3s,KStatus,KRawStatus,KAv
 
 `ConfirmedMode=WALKING` は保存時点の確定キャッシュだが、表示再構成では `ConstantRegionSpeedKmh` と表示対象の GPS 点列から再評価する。GPS速度または `ConstantRegionSpeedKmh` が `walkingVehicleSpeedThresholdKmh` 以上、または歩数推定速度との差が `walkingGpsStepMismatchThresholdKmh` 以上なら、表示色は `VEHICLE` として扱う。CSV / Room の列は増やさず、既存列の解釈だけで行う。
 
-定速領域継続中も `ConstantRegionKind` は暫定値として更新される。区間が閉じるまで判定は変化しうるため、`ConfirmedMode` は空欄のままにする。表示側は最後に `ConfirmedMode` が入っている行を確定ポイントとし、確定ポイント以後の行だけ、この暫定値で描き替える。`STAY` の間は地図上で stay point 1 点へ集約し、`CONSTANT_MOVE` の間は記録された GPS 点列をそのまま扱う。
+定速領域継続中も `ConstantRegionKind` は暫定値として更新される。区間が閉じるまで判定は変化しうるため、`ConfirmedMode` は空欄のままにする。表示側は最後に `ConfirmedMode` が入っている行を確定ポイントとし、確定ポイント以後の行だけ、この暫定値で描き替える。`DEVICE_STILL / STOPPED` が連続する停止領域は地図上で代表点 1 点へ集約し、旧ログ互換として `STAY` の間も stay point 1 点へ集約する。`CONSTANT_MOVE` の間は記録された GPS 点列をそのまま扱う。
 
 定速領域が閉じて `STAY / CONSTANT_MOVE` が確定した場合、アプリは当該区間の既存 `MotionSample` を確定結果でバックフィルする。標準列は増やさず、同じ `Timestamp` の `ConfirmedMode`、`ConstantRegionKind`、`ConstantRegionSpeedKmh`、`ConstantRegionStart*`、`ConstantRegionEnd*`、`ConstantRegionStay*`、`ConstantRegionDirectionDeg` を置き換える。これにより、`ConfirmedMode` は「ここまでは後から変わらない」確定キャッシュとして扱える。
 
@@ -99,7 +99,7 @@ import は、旧ヘッダ `Timestamp,AccelStddev3s,AccelMad3s,StepDelta3s,StepRa
 
 - 新規記録では状態変化点を中心に 1 レコードを記録する
 - 標準交換形式の記録 CSV とは混在させない
-- 判定用の基礎指標に加えて、新方式の `stK / trK / w-status / 確定モード / GPS 取得判断` を保持する。`trK` は表示モードへ直接は使わないが、`trK=ON` や `STK4` 変化点では `TrKAvg / TrKRatio / StKAvg / StKRatio` を保存し、閾値解析に使う
+- 判定用の基礎指標に加えて、新方式の `stK / trK / w-status / 確定モード / GPS 取得判断` を保持する。`trK` は表示モードへ直接は使わないが、`trK4` や `STK4` 変化点では `TrKAvg / TrKRatio / StKAvg / StKRatio` を保存し、閾値解析に使う
 - 加速度座標変換の source（RotationVector / accel+mag / device / norm fallback）は `KAccelSource` として CSV / Room に保存する。デバッグログの `accelSource` も実機調査用に維持する
 - 欠損値は空欄で表現する
 - これらの値は `完全停止 / 停止 / 徒歩 / 高速移動` のモード判定に利用する

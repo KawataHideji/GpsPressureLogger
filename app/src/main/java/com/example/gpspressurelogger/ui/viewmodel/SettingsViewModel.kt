@@ -112,13 +112,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val success = withContext(Dispatchers.IO) {
             ExportUtil.writeLocalDebugLog(getApplication(), "EXPORT_STANDARD_STARTED uri=$fileUri")
             try {
-                val allEntries = db.logDao().getEntriesSinceOnce(0L)
+                val entryCount = db.logDao().countSince(0L)
                 ExportUtil.writeLocalDebugLog(
                     getApplication(),
-                    "EXPORT_STANDARD_REQUESTED uri=$fileUri rows=${allEntries.size}"
+                    "EXPORT_STANDARD_REQUESTED uri=$fileUri rows=$entryCount"
                 )
-                ExportUtil.writeEntriesToUri(getApplication(), fileUri, allEntries)
-            } catch (e: Exception) {
+                ExportUtil.writeEntriesToUriPaged(getApplication(), fileUri, db)
+            } catch (e: Throwable) {
                 ExportUtil.writeLocalDebugLog(
                     getApplication(),
                     "EXPORT_STANDARD_FAILED uri=$fileUri reason=query:${e.javaClass.simpleName}:${e.message ?: "unknown"}"

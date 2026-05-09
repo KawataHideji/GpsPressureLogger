@@ -168,15 +168,18 @@ Room は表示都合の派生値ではなく、できるだけ元の意味に近
 
 - `motion_samples.trKStatus: String?`
   - nullable
-  - 1 秒窓 `trK` の確定値。`ON / OFF`
+  - 1 秒窓 `trK` の確定値。`TRK1 / TRK2_TRK3 / TRK4`
+  - 旧ログの `ON / OFF` は import / 表示時に `TRK4 / TRK2_TRK3` として扱う
 
 - `motion_samples.trKRawStatus: String?`
   - nullable
-  - 1 秒窓 `trK` の raw 候補値。`ON / OFF`
+  - 1 秒窓 `trK` の raw 候補値。`TRK1 / TRK2_TRK3 / TRK4`
+  - 旧ログの `ON / OFF` は import / 表示時に `TRK4 / TRK2_TRK3` として扱う
 
 - `motion_samples.trKAvg: Float?`
+  - 過去 2 秒の平均水平方向 `H` へ直近 1 秒サンプルを射影した `Hk_i` の平均。符号付きで保存し、判定では絶対値を使う。
   - nullable
-  - 1 秒窓の 3 軸ベクトル平均ノルム
+  - `abs(trKAvg) < 0.015` は `TRK1`、`0.05 <= abs(trKAvg) < 0.28` は `TRK4` の下限・上限判定に使う
 
 - `motion_samples.trKScalarAvg: Float?`
   - nullable
@@ -184,8 +187,7 @@ Room は表示都合の派生値ではなく、できるだけ元の意味に近
 
 - `motion_samples.trKDirectionalityRatio: Float?`
   - nullable
-  - `trKAvg / trKScalarAvg`
-  - 外部 CSV では `TrKRatio` として出力する。算出不能時は null を保存する。旧 CSV の `TrKDirectionalityRatio` は import 互換として受け入れる
+  - 外部 CSV では `TrKRatio` として出力する。`stddev(Hk_i) / abs(trKAvg)` として算出し、算出不能時は null を保存する。旧 CSV の `TrKDirectionalityRatio` は import 互換として受け入れる
 
 - `motion_samples.trKMaxMagnitude: Float?`
   - nullable

@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 OSM_TILE_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 USER_AGENT = "GpsPressureLoggerViewer/1.0 (+local tile proxy)"
+CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
 
 
 @dataclass
@@ -43,7 +44,10 @@ class TileProxyServer:
 
                 tile_path = cache_dir / str(z) / str(x) / f"{y}.png"
                 if tile_path.exists():
-                    self._serve_file(tile_path)
+                    try:
+                        self._serve_file(tile_path)
+                    except CLIENT_DISCONNECT_ERRORS:
+                        return
                     return
 
                 tile_path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +61,10 @@ class TileProxyServer:
                     return
 
                 tile_path.write_bytes(data)
-                self._serve_file(tile_path)
+                try:
+                    self._serve_file(tile_path)
+                except CLIENT_DISCONNECT_ERRORS:
+                    return
 
             def log_message(self, format: str, *args) -> None:  # noqa: A003
                 return

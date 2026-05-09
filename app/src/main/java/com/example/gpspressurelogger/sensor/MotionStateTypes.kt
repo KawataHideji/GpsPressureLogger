@@ -3,8 +3,19 @@ package com.example.gpspressurelogger.sensor
 import com.example.gpspressurelogger.sensor.MovementDetector.Mode
 
 enum class TrKStatus {
-    OFF,
-    ON
+    TRK1,
+    TRK2_TRK3,
+    TRK4;
+
+    companion object {
+        fun fromStored(value: String?): TrKStatus? = when (value) {
+            "TRK1" -> TRK1
+            "TRK2_TRK3", "TRK2", "TRK3" -> TRK2_TRK3
+            "TRK4", "ON" -> TRK4
+            "OFF" -> TRK2_TRK3
+            else -> null
+        }
+    }
 }
 
 enum class StKStatus {
@@ -64,6 +75,11 @@ data class TrKSnapshot(
     val horizontalMaxMagnitude: Float? = null,
     val source: AccelCoordinateSource,
     val confidence: Float
+)
+
+data class TrKTransitionSnapshot(
+    val trK: TrKSnapshot,
+    val stK: StKSnapshot
 )
 
 data class StKSnapshot(
@@ -145,6 +161,7 @@ data class ConstantRegionResult(
 data class MotionStateSnapshot(
     val timestampMs: Long,
     val trK: TrKSnapshot,
+    val trKImmediate: TrKTransitionSnapshot?,
     val stK: StKSnapshot,
     val wStatus: WStatusSnapshot,
     val walkingSpeed: WalkingSpeedSnapshot,

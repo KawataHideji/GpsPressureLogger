@@ -6,10 +6,15 @@ package com.example.gpspressurelogger.sensor
  * 状態管理部はしきい値や時間を直値で持たず、必ずこの現在値を参照する。
  *
  * @property baseCycleMs 状態管理を評価する基本周期。主記録スロットと同じ 3 秒を想定する。
- * @property trKWindowMs trK（加速度トリガー）の解析窓。短いほどGPS即時起動は速いが、端末操作にも反応しやすい。
- * @property trKAvgThreshold trKをONにする直近1秒窓の平均水平加速度しきい値。下げるとGPS即時起動が増える。
+ * @property trKWindowMs trK（加速度トリガー）の射影評価窓。短いほどGPS即時起動は速いが、端末操作にも反応しやすい。
+ * @property trKDirectionWindowMs trK の基準方向 H を求める窓。射影評価窓以上にする。
+ * @property trK1AvgThreshold trK1（trK静止）とみなす直近1秒射影平均の絶対値しきい値。
+ * @property trKAvgThreshold trKをONにする直近1秒射影平均の絶対値の下限。下げるとGPS即時起動が増える。
+ * @property trKAvgUpperThreshold trKをONにする直近1秒射影平均の絶対値の上限。強すぎる手持ち揺れを除外する。
  * @property trKRatioThreshold trKをONにする直近1秒窓の射影標準偏差比しきい値。小さいほど一定方向の水平加速度だけを拾う。
+ * @property stK1AvgThreshold stK1（静止）とみなす3秒窓の平均水平加速度しきい値。
  * @property stK4AvgThreshold stK4（加速・減速・旋回）とみなす3秒窓の平均水平加速度しきい値。
+ * @property stK4AvgUpperThreshold stK4（加速・減速・旋回）とみなす3秒窓の平均水平加速度上限。
  * @property stK4RatioThreshold stK4（加速・減速・旋回）とみなす3秒窓の射影標準偏差比しきい値。
  * @property stK2ScalarAvgThreshold stK2（往復振動）とみなすスカラー平均ノルムの下限。
  *   徒歩のフットストライクは個々のサンプルが大きいので scalarAvg が高くなる。
@@ -36,9 +41,14 @@ package com.example.gpspressurelogger.sensor
 data class MotionStateParams(
     val baseCycleMs: Long = 3_000L,
     val trKWindowMs: Long = 1_000L,
-    val trKAvgThreshold: Float = 0.10f,
-    val trKRatioThreshold: Float = 0.75f,
+    val trKDirectionWindowMs: Long = 2_000L,
+    val trK1AvgThreshold: Float = 0.015f,
+    val trKAvgThreshold: Float = 0.05f,
+    val trKAvgUpperThreshold: Float = 0.28f,
+    val trKRatioThreshold: Float = 0.65f,
+    val stK1AvgThreshold: Float = 0.015f,
     val stK4AvgThreshold: Float = 0.08f,
+    val stK4AvgUpperThreshold: Float = 0.28f,
     val stK4RatioThreshold: Float = 0.75f,
     val stK2ScalarAvgThreshold: Float = 0.25f,
     val stK2VarianceThreshold: Float = 0.01f,
@@ -64,9 +74,17 @@ data class MotionStateParams(
     init {
         require(baseCycleMs > 0L) { "baseCycleMs must be positive" }
         require(trKWindowMs > 0L) { "trKWindowMs must be positive" }
+        require(trKDirectionWindowMs >= trKWindowMs) { "trKDirectionWindowMs must be >= trKWindowMs" }
+        require(trK1AvgThreshold >= 0f) { "trK1AvgThreshold must be non-negative" }
+        require(trKAvgThreshold > trK1AvgThreshold) { "trKAvgThreshold must be > trK1AvgThreshold" }
         require(trKAvgThreshold > 0f) { "trKAvgThreshold must be positive" }
+        require(trKAvgUpperThreshold > trKAvgThreshold) { "trKAvgUpperThreshold must be > trKAvgThreshold" }
         require(trKRatioThreshold >= 0f) { "trKRatioThreshold must be non-negative" }
+        require(stK1AvgThreshold >= 0f) { "stK1AvgThreshold must be non-negative" }
         require(stK4AvgThreshold > 0f) { "stK4AvgThreshold must be positive" }
+        require(stK4AvgUpperThreshold > stK4AvgThreshold) {
+            "stK4AvgUpperThreshold must be > stK4AvgThreshold"
+        }
         require(stK4RatioThreshold >= 0f) { "stK4RatioThreshold must be non-negative" }
         require(stK2ScalarAvgThreshold > 0f) { "stK2ScalarAvgThreshold must be positive" }
         require(stK2VarianceThreshold > 0f) { "stK2VarianceThreshold must be positive" }

@@ -11,14 +11,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+data class MapUiState(
+    val targetDateStart: Long = GpsUtil.getLoggingStart(System.currentTimeMillis()),
+    val entries: List<LogEntry> = emptyList(),
+    val motionSamples: List<MotionSample> = emptyList()
+)
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class MapViewModel(application: Application) : AndroidViewModel(application) {
@@ -27,45 +30,38 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     // 表示対象日の開始時刻（直近の3:00が初期値）
     private val _targetDateStart = MutableStateFlow(GpsUtil.getLoggingStart(System.currentTimeMillis()))
-    val targetDateStart: StateFlow<Long> = _targetDateStart.asStateFlow()
-
-    private val preparedEntries = _targetDateStart
-        .flatMapLatest { start ->
-            flow {
-                val raw = db.logDao().getEntriesBetweenAscOnce(start, start + GpsUtil.DAY_MS)
-                emit(GpsUtil.prepareMapEntries(raw, start))
-            }.flowOn(Dispatchers.Default)
-        }
-
-    val motionSamples: StateFlow<List<MotionSample>> = _targetDateStart
-        .flatMapLatest { start ->
-            flow {
-                emit(db.motionSampleDao().getBetweenOnce(start, start + GpsUtil.DAY_MS))
-            }.flowOn(Dispatchers.Default)
-        }
-        .map { samples -> samples.sortedBy { it.timestamp } }
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5_000),
-            initialValue = emptyList()
-        )
 
     /**
      * 選択された日の表示用エントリ一覧（3:00 〜 翌2:59）。
      * GPS 異常値除去のあと、viewer で試験した表示専用停止補正を適用する。
      */
-    val entries: StateFlow<List<LogEntry>> = combine(preparedEntries, motionSamples) { mapEntries, samples ->
-        if (samples.isEmpty()) {
-            mapEntries
-        } else {
-            GpsUtil.normalizeStopsForDisplay(mapEntries, samples)
+    val mapUiState: StateFlow<MapUiState> = _targetDateStart
+        .flatMapLatest { start ->
+            flow {
+                val rawEntries = db.logDao().getEntriesBetweenAscOnce(start, start + GpsUtil.DAY_MS)
+                val samples = db.motionSampleDao()
+                    .getBetweenOnce(start, start + GpsUtil.DAY_MS)
+                    .sortedBy { it.timestamp }
+                val preparedEntries = GpsUtil.prepareMapEntries(rawEntries, start)
+                val displayEntries = if (samples.isEmpty()) {
+                    preparedEntries
+                } else {
+                    GpsUtil.normalizeStopsForDisplay(preparedEntries, samples)
+                }
+                emit(
+                    MapUiState(
+                        targetDateStart = start,
+                        entries = displayEntries,
+                        motionSamples = samples
+                    )
+                )
+            }
         }
-    }
         .flowOn(Dispatchers.Default)
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
-            initialValue = emptyList()
+            initialValue = MapUiState(targetDateStart = _targetDateStart.value)
         )
 
     fun moveToPrevDay() {

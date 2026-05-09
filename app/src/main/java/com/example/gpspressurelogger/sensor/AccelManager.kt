@@ -8,14 +8,14 @@ package com.example.gpspressurelogger.sensor
  */
 class AccelManager(
     private val paramsProvider: MotionStateParamsProvider,
-    private val onTrKChanged: (snapshot: TrKSnapshot) -> Unit
+    private val onTrKChanged: (snapshot: TrKTransitionSnapshot) -> Unit
 ) {
 
     private val trKDetector = TrKDetector(paramsProvider)
     private val stKSlotClassifier = StKSlotClassifier(paramsProvider)
     private val accelerationTransformer = WorldAccelerationTransformer()
     private var lastTrKSnapshot: TrKSnapshot? = null
-    private var pendingTrKImmediate = false
+    private var pendingTrKImmediate: TrKTransitionSnapshot? = null
 
     /**
      * 前回 base_cycle 以降の加速度列を消費し、stK を取得する。
@@ -36,14 +36,14 @@ class AccelManager(
     }
 
     /**
-     * 前回 base_cycle 以降に trK ON 遷移で GPS 即時取得を要求したかを返す。
+     * 前回 base_cycle 以降に trK4 遷移で GPS 即時取得を要求したかを返す。
      *
      * 実際の即時取得は trK callback で行い、この値は3秒補助ログの GpsImmediate と
      * 状態スナップショットの辻褄を合わせるために使う。
      */
-    fun consumeTrKImmediateForSlot(): Boolean = synchronized(this) {
+    fun consumeTrKImmediateForSlot(): TrKTransitionSnapshot? = synchronized(this) {
         val immediate = pendingTrKImmediate
-        pendingTrKImmediate = false
+        pendingTrKImmediate = null
         immediate
     }
 
@@ -78,15 +78,19 @@ class AccelManager(
         changedSnapshot?.let(onTrKChanged)
     }
 
-    private fun updateTrKAndNotifyLocked(timestampMs: Long): TrKSnapshot? {
+    private fun updateTrKAndNotifyLocked(timestampMs: Long): TrKTransitionSnapshot? {
         val snapshot = trKDetector.update(timestampMs)
         val previousStatus = lastTrKSnapshot?.status
         lastTrKSnapshot = snapshot
         if (previousStatus == null || snapshot.status != previousStatus) {
-            if (snapshot.status == TrKStatus.ON) {
-                pendingTrKImmediate = true
+            val transition = TrKTransitionSnapshot(
+                trK = snapshot,
+                stK = stKSlotClassifier.peekSlot(timestampMs)
+            )
+            if (snapshot.status == TrKStatus.TRK4) {
+                pendingTrKImmediate = transition
             }
-            return snapshot
+            return transition
         }
         return null
     }

@@ -1,6 +1,6 @@
 # 機能仕様書：GpsPressureLogger
 
-最終更新: 2026-05-06
+最終更新: 2026-05-09
 
 ## 1. 概要
 GpsPressureLogger は、Android 端末上で GPS・気圧・歩数を時系列記録し、グラフと地図で閲覧できるロガーです。通常運用では端末内の Room DB を正規データとして保持し、必要に応じて標準 CSV を import / export します。
@@ -51,7 +51,146 @@ GpsPressureLogger は、Android 端末上で GPS・気圧・歩数を時系列�
 
 ## 3. 機能仕様
 
-### 3.1 記録機能
+### 3.1 状態管理
+- 状態管理は、GPS の取得周期、GPS 座標の記録集約、地図・グラフの表示色、状態イベントログ出力を決める中核機能とする。
+- 加速度状態は `Sensor.TYPE_LINEAR_ACCELERATION` を優先して判定する。`Sensor.TYPE_ROTATION_VECTOR` が使える場合は線形加速度を世界座標（East / North / Up）へ変換し、端末の向きに依存しにくい形で減速・旋回・加速を拾う。Rotation Vector が使えない場合は `TYPE_ACCELEROMETER + TYPE_MAGNETIC_FIELD` の回転行列へ fallback し、それも使えない場合は端末座標または raw accelerometer の重力差分ノルムを fallback とする。
+
+#### 3.1.1 trK系（加速度拡張1秒系）
+
+| 状態 | 意味 | 判定式 |
+| --- | --- | --- |
+| `trK4` | 加速・減速・方向転換。GPS 即時起動の対象。 | 下記 `trK4` 判定式を満たす。 |
+| `trK1` | trK 静止。 | `abs(TrKAvg) < 0.015`。 |
+| `trK2`, `trK3` | `trK1` でも `trK4` でもない状態。 | `not trK1 and not trK4`。現行ログの `TrKStatus` は `ON/OFF` のため、`trK2/trK3` は必要に応じて `TrKAvg / TrKRatio` から解析する。 |
+
+`trK4` 判定式:
+
+```text
+H = normalize(average(k_i, t-2s <= i <= t))
+Hk_i = dot(k_i, H)
+t-1s <= i <= t
+TrKAvg = average(Hk_i)
+TrKRatio = stddev(Hk_i) / abs(TrKAvg)
+
+(0.05 <= abs(TrKAvg) < 0.28)
+and noSignFlip(Hk_i, TrKAvg)
+and TrKRatio <= 0.65
+```
+
+#### 3.1.2 stK系（加速度3秒系）
+
+| 状態 | 意味 | 判定式 |
+| --- | --- | --- |
+| `STK4` | 加速・減速・方向転換。`trK4` 判定の 3 秒版。 | 下記 `STK4` 判定式を満たす。 |
+| `STK1` | 静止。`trK1` の 3 秒版。 | `abs(StKAvg) < 0.015`。 |
+| `STK2`, `STK3` | `STK1` でも `STK4` でもない状態。 | `not STK1 and not STK4`。コード上・ログ上は `STK2` または旧互換表示名 `K2_K3` としてまとめて扱う。 |
+
+`STK4` 判定式:
+
+```text
+H = normalize(average(k_i, t-3s <= i <= t))
+Hk_i = dot(k_i, H)
+t-3s <= i <= t
+StKAvg = average(Hk_i)
+StKRatio = stddev(Hk_i) / abs(StKAvg)
+
+(0.08 <= abs(StKAvg) < 0.28)
+and noSignFlip(Hk_i, StKAvg)
+and StKRatio <= 0.75
+```
+
+#### 3.1.3 W系（歩行系）
+
+| 状態 | 意味 | 判定式 |
+| --- | --- | --- |
+| `W1` | 歩行中。 | `StepEvents(t-9s, t) >= 2 and t - LastStepEventTime <= 5s`。歩行イベントは `TYPE_STEP_DETECTOR` を優先し、使えない場合だけ `TYPE_STEP_COUNTER` 増分を fallback とする。 |
+| `W2` | 歩行していない。 | `not W1`。 |
+
+#### 3.1.4 W2詳細系（W2を詳細化）
+
+| 状態 | 意味 | 判定式 |
+| --- | --- | --- |
+| `NONE` | `W2` 詳細状態がまだない、または判定対象外。 | `not W2DetailTarget or GpsPointCount < minRequired`。 |
+| `STAY` | `W2` かつ GPS 速度からほぼ停止している状態。 | `W2 and FittedGpsSpeedKmh <= staySpeedThresholdKmh`。 |
+| `CONSTANT_MOVE` | `W2` かつ GPS 速度から移動している状態。 | `W2 and FittedGpsSpeedKmh > staySpeedThresholdKmh`。 |
+
+#### 3.1.5 統合系
+
+| 状態 | 意味 | 判定式 |
+| --- | --- | --- |
+| `UNKNOWN` | 統合状態が未確定。 | `not DEVICE_STILL and not STOPPED and not VEHICLE and not WALKING`。 |
+| `DEVICE_STILL` | 完全停止。 | `STK1`。 |
+| `STOPPED` | 停止。 | `(STAY or STK2) and not STK1`。 |
+| `VEHICLE` | 高速移動・乗り物移動。 | `(STK4 and W2) or (W1 and GpsSpeedKmh >= walkingVehicleSpeedThresholdKmh) or (W1 and abs(GpsSpeedKmh - StepSpeedKmh) >= walkingGpsStepMismatchThresholdKmh) or CONSTANT_MOVE`。 |
+| `WALKING` | 徒歩移動。 | `W1 and GpsSpeedKmh < walkingVehicleSpeedThresholdKmh and abs(GpsSpeedKmh - StepSpeedKmh) < walkingGpsStepMismatchThresholdKmh`。 |
+
+- 統合系の表示用 `finalMode` は `UNKNOWN / DEVICE_STILL / STOPPED / WALKING / VEHICLE` とする。
+
+`W1` の徒歩・高速移動判定:
+
+| 項目 | 式・条件 |
+| --- | --- |
+| 歩数推定速度 | `StepSpeedKmh = StepDeltaWindow * walkingStepLengthM / walkingSpeedWindowMs * 3.6` |
+| GPS速度補完 | `GpsSpeedKmh == null and ConstantRegionKind == CONSTANT_MOVE` の場合、`ConstantRegionSpeedKmh` を `GpsSpeedKmh` の代替として使う。 |
+| `VEHICLE` | `W1 and GpsSpeedKmh >= walkingVehicleSpeedThresholdKmh`、または `W1 and abs(GpsSpeedKmh - StepSpeedKmh) >= walkingGpsStepMismatchThresholdKmh`。 |
+| `WALKING` | `W1 and GpsSpeedKmh < walkingVehicleSpeedThresholdKmh and abs(GpsSpeedKmh - StepSpeedKmh) < walkingGpsStepMismatchThresholdKmh`。 |
+
+`MotionSample.confirmedMode` の扱い:
+
+| 項目 | 仕様 |
+| --- | --- |
+| 役割 | 表示用 `finalMode` の確定キャッシュ。 |
+| 保存対象 | `STK4`、`W1`、または閉じた定速領域の確定結果。 |
+| 未確定領域 | 現在まで継続中の未確定領域は `confirmedMode=null` のまま保存し、表示時に暫定状態として再構成する。 |
+| バックフィル | 定速領域が `STAY / CONSTANT_MOVE` と確定した時点で、区間内の `MotionSample.confirmedMode` と定速領域情報を確定結果で更新する。Room DB は即時更新し、ローカル motion CSV は debounce / バッチ単位で再書き換えする。 |
+| 表示側の確定ポイント | 時刻順に見た最後の `confirmedMode` 保存行。確定ポイント以前は確定キャッシュ、以後は raw の `KStatus(stK) / WStatus / ConstantRegionKind` から暫定表示を計算する。 |
+| 表示時再評価 | 保存済み `ConfirmedMode=WALKING` でも、同じ行の `CONSTANT_MOVE` 速度または表示対象 GPS 点列から高速移動判定できる場合は `VEHICLE` として描画する。 |
+
+GPS 座標の記録集約:
+
+| `GpsAggregationMode` | 判定式 | 記録方法 |
+| --- | --- | --- |
+| `MOVING` | `STK4 or W1 or CONSTANT_MOVE` | 移動中として GPS 点を採用・補間する。 |
+| `DEVICE_STILL` | `STAY and STK1` | 完全停止として GPS 点を平均化する。 |
+| `STOPPED` | `STAY and not STK1` | 停止として GPS 点を平均化する。 |
+| `UNKNOWN` | 上記以外 | 停止寄りの平均化、または欠損扱い。 |
+
+GPS 更新間隔:
+
+| 条件 | GPS間隔 | 補足 |
+| --- | --- | --- |
+| `trK4` へ遷移 | 即時 burst + 通常 2 秒周期へ張り替え | 3 秒 base cycle を待たずに GPS burst 要求を開始する。 |
+| `STK4` | 2 秒 | `STK4` 継続中の base cycle では追加 burst を重ねず、2 秒周期の通常 GPS 更新を維持する。 |
+| `W1` | 5 秒 | W1時のGPS速度/歩数速度比較で `VEHICLE` に倒れても、GPSサンプリング制御は `stK / WStatus` ベースのまま。 |
+| その他 | 5 秒から 10 秒、15 秒、20 秒... と線形に伸長。初期上限は 30 秒。 | 伸長カウンタは、直前スロットで採用可能な GPS（位置あり、精度 `GPS_STRETCH_ACCEPT_ACCURACY_M=80m` 以下）を得られた場合だけ進める。GPS欠損または低精度の場合、次回は 5 秒からやり直す。 |
+
+GPS burst:
+
+| 項目 | 値・条件 |
+| --- | --- |
+| API | `requestLocationUpdates()` |
+| 優先度 | `PRIORITY_HIGH_ACCURACY` |
+| interval | `500ms` |
+| minInterval | `100ms` |
+| maxUpdateAge | `500ms` |
+| duration | `10秒` |
+| maxUpdates | `10` |
+| 即採用 | `accuracy <= 30m` の良点が来たら採用して停止する。 |
+| timeout時採用 | 10 秒以内に良点が来なければ、その間の最良点が `accuracy <= 80m` の場合だけ採用する。 |
+| timeout時棄却 | 最良点も `accuracy > 80m` の場合は欠損扱いにする。 |
+| debug event | `GPS_BURST_START / CANDIDATE / ACCEPT / REJECT / STOP / SKIPPED_COOLDOWN / UNAVAILABLE / SECURITY_ERROR`。 |
+
+GPS 張り替え・状態イベントログ:
+
+| 項目 | 仕様 |
+| --- | --- |
+| 引き延ばしカウンタリセット | `trK4` 遷移、または 3 秒 base cycle で `STK4` へ入った瞬間に 0 へ戻す。 |
+| `STK4` 離脱後 | `W1` なら 5 秒周期へ戻る。`STK4` でも `W1` でもない場合は 5 秒から伸長を再開する。 |
+| GPS要求張り替え | 短くする方向と mode が変わる場合は即時。同じ mode のまま長くする方向は `GPS_DYNAMIC_INTERVAL_MIN_HOLD_MS=30秒` 以上維持してから行う。 |
+| 即時GPSイベントログ | `trK4` 遷移による即時 GPS 取得、または `STK4` 新規遷移は、状態イベントログの `GpsImmediate=1` として残す。 |
+| 解析用指標 | 同じ行に `TrKAvg / TrKRatio / StKAvg / StKRatio` を保存する。`TrKRatio` は算出不能時に空欄を許容する。 |
+
+### 3.2 記録機能
 - 気圧、海面更正気圧、GPS 緯度経度、高度、歩数増分を時系列で保存する。
 - 主記録の論理生成周期は 3 秒とし、主記録は 3 秒スロットごとに 1 レコードを持てるものとする。
 - 主記録では GPS / 高度 / 気圧 / 歩数増分の欠損を認め、欠損列は空欄または `null` として扱う。気圧と補正気圧は通常 3 分ごとにだけ保存し、GPS と歩数は従来どおり 3 秒スロットで扱う。
@@ -60,10 +199,8 @@ GpsPressureLogger は、Android 端末上で GPS・気圧・歩数を時系列�
 - 主記録と補助指標は、平常時はメモリ上のキューへ蓄え、日次 CSV などファイル系ストアへの書き出しは既定で 100 件ごとにまとめて行う。
 - Room DB への保存は遅延させず、主記録・補助指標ともに生成時点で反映する。
 - ファイル系ストアへの書き出し前でも、手動 export、サービス終了、未捕捉例外検知などの失いたくないタイミングでは強制フラッシュする。
-- 移動状態に応じて GPS 更新間隔を動的に切り替える。
 - 起動時の旧歩数補完処理は毎回ではなく、必要な移行バージョンで一度だけ行う。
 - 端末再起動と APK 更新後は、利用者が次にアプリを開いた時に `LoggingService` を起動する。`BootReceiver` 自身は記録を再開しない。
-- 移動状態は `完全停止`、`停止`、`徒歩`、`高速移動` の 4 段階で扱う。
 - GPS がない時刻も、気圧や歩数のみの部分レコードとして保持する。
 - 歩数は `StepsDelta` として保持し、表示時に 03:00 区切り日単位で集計する。
 - ホーム画面の現在歩数は、アプリ起動中に 03:00 の記録日境界を跨いだ場合も、最新ログ時刻から新しい日の開始時刻を再計算して集計対象を切り替える。
@@ -72,38 +209,8 @@ GpsPressureLogger は、Android 端末上で GPS・気圧・歩数を時系列�
 - 歩数センサーは、`Sensor.TYPE_STEP_DETECTOR` と `Sensor.TYPE_STEP_COUNTER` の両方を使う。
 - `TYPE_STEP_DETECTOR` は低遅延な歩行イベントとして `W1 / W2` 判定に使う。`TYPE_STEP_COUNTER` は最大 10 秒程度遅延することがあるため、歩行中 / 非歩行中のリアルタイム判定には単独では使わない。
 - `TYPE_STEP_COUNTER` は OS が保持する累積歩数を正式な歩数増分 `StepsDelta` として保存するために使い、`TYPE_STEP_DETECTOR` のイベントは歩数として二重計上しない。
-- 加速度状態は `Sensor.TYPE_LINEAR_ACCELERATION` を優先して判定する。`Sensor.TYPE_ROTATION_VECTOR` が使える場合は線形加速度を世界座標（East / North / Up）へ変換し、端末の向きに依存しにくい形で減速・旋回・加速を拾う。Rotation Vector が使えない場合は `TYPE_ACCELEROMETER + TYPE_MAGNETIC_FIELD` の回転行列へ fallback し、それも使えない場合は端末座標または raw accelerometer の重力差分ノルムを fallback とする。
-- 歩行状態は `TYPE_STEP_DETECTOR` を優先して判定する。`TYPE_STEP_DETECTOR` が使える端末では detector イベントだけを歩行イベントとして `W1 / W2` 判定窓へ入れ、`TYPE_STEP_COUNTER` は正式な `StepsDelta` 保存だけに使う。`TYPE_STEP_DETECTOR` が使えない端末だけ、`TYPE_STEP_COUNTER` 増分を歩行イベントの fallback として使う。直近 `wWindowMs=9秒` 内の歩行イベント数が `wStepDeltaThreshold=2` 以上、かつ最後の歩行イベントから `walkingThresholdMs=5秒` 以内なら `W1`、それ以外は `W2` とする。
-- `完全停止` は、携帯が置かれていてほぼ触られていない状態を表し、通常の `停止` より強い省電力制御候補とする。
-- 加速度は、GPS 即時起動用の `trK`（加速度トリガー）と、3 秒ログ・FinalMode 用の `stK`（加速度状態）に分けて扱う。
-- `trK` は加速度イベントごとに直近 `trKWindowMs=1秒` の変換済み線形加速度から水平成分 `h_i=(x_i,y_i)` だけを使う。`m=average(h_i)`, `k=|m|`, `u=m/k`, `p_i=h_i・u`, `sigma=stddev(p_i)`, `ratio=sigma/k` を求め、`TrKAvg(=k) >= trKAvgThreshold` かつ `TrKDirectionalityRatio(=ratio) <= trKRatioThreshold` のとき `ON` とする。`k` が十分小さい場合は ratio を計算せず `OFF` とする。
-- `stK` は 3 秒 base cycle ごとに、前回 base cycle 以降に入った加速度イベント列全体で判定する。
-- `stK4` も同じ式を 3 秒スロット全体へ適用し、`KAvg(=k) >= stK4AvgThreshold(0.08)` かつ `KDirectionalityRatio(=ratio) <= stK4RatioThreshold(0.75)` のとき判定する。上下成分は使わず、発進・減速・カーブ・右左折のような水平方向のまとまった速度ベクトル変化を表す。
-- `stK2` は `stK4` でなく、3 秒スロット全体の変換済み合成加速度ノルム分散 `KVariance >= stK2VarianceThreshold(0.01)` のときに判定し、方向性は残らないが揺れ・振動が大きい状態を表す。
-- `stK1` は上記以外で、加速度なしまたは極めて安定した等速直線運動を表す。
-- `W1` は直近 `wWindowMs` 内の歩行イベント数が `wStepDeltaThreshold` 以上、かつ最後の歩行イベントから `walkingThresholdMs` 以内の状態とする。補助ログ用にはこの歩行イベント数 / 歩数増分を `StepDeltaWindow` として保存する。
-- `STK4 + W2` は高速移動とする。
-- `W1` の場合は、直近 `walkingSpeedWindowMs` の GPS 速度と歩数推定速度で最終判定する。GPS 速度が `walkingVehicleSpeedThresholdKmh` 以上なら高速移動、未満でも `abs(GPS速度 - 歩数推定速度) >= walkingGpsStepMismatchThresholdKmh` なら高速移動、それ以外は徒歩とする。歩数推定速度は `StepDeltaWindow * walkingStepLengthM / walkingSpeedWindowMs` で求める。直近 GPS 速度が取れず、同時に定速領域 `CONSTANT_MOVE` の速度が得られる場合は、その `ConstantRegionSpeedKmh` を GPS 速度の代替として使う。
-- `W2` かつ `STK4` ではない区間は定速領域として扱い、直線近似速度が `staySpeedThresholdKmh` 以下なら `STAY`、超えるなら `CONSTANT_MOVE` とする。
-- `完全停止` は `STAY + STK1` を基準に判定する。
-- `停止` は `STAY + STK2` を基準に判定する。
-- `高速移動` は `STK4 + W2`、`W1` だがGPS速度/歩数速度から高速移動寄りと判定された状態、または定速領域の `CONSTANT_MOVE` を基準に判定する。
-- 定速領域の `stay / constant move` 判定では、直線近似前に重心から大きく離れた孤立 GPS 点を棄却する。
-- 定速領域が `STAY / CONSTANT_MOVE` と確定した時点で、その区間内に保存済みの `MotionSample.confirmedMode` と定速領域情報を確定結果でバックフィルする。Room DB への反映は即時に行い、ローカル motion CSV への反映は debounce / バッチ単位でまとめて再書き換えする。これにより、区間序盤の暫定判断が確定後もログ上に残らないようにしつつ、確定のたびに日次 CSV 全体を書き直すことは避ける。
-- `MotionSample.confirmedMode` は確定キャッシュであり、`STK4`、`W1`、または閉じた定速領域の確定結果だけを保存する。現在まで継続中の未確定領域は `confirmedMode=null` のまま保存し、表示時にだけ暫定状態として再構成する。表示側は保存済み `ConfirmedMode=WALKING` でも、同じ行の `CONSTANT_MOVE` 速度または表示対象の GPS 点列から高速移動判定できる場合は `VEHICLE` として描画する。
-- 表示側の確定ポイントは、時刻順に見た最後の `confirmedMode` 保存行とする。地図・歩数グラフは確定ポイント以前を確定キャッシュどおり描き、確定ポイント以後だけ raw の `KStatus(stK) / WStatus / ConstantRegionKind` から暫定表示を計算する。
-- GPS座標の記録集約は、表示用4状態 `finalMode` ではなく、記録専用の `GpsAggregationMode` で決める。`STK4`、`W1`、`CONSTANT_MOVE` は `MOVING`、`STAY + STK1` は `DEVICE_STILL`、`STAY + STK2` は `STOPPED` として扱う。これにより、W1時のGPS速度/歩数速度比較で表示状態が `VEHICLE` に倒れても、GPS座標の記録方法は `W1 -> MOVING` のまま変わらない。
-- GPS 更新間隔は `stK4` で 2 秒、`W1` で 5 秒、その他（`stK4` でも `W1` でもない状態）で 5 秒から 10 秒、15 秒、20 秒... と線形に引き延ばし、初期値では 30 秒を上限とする。ただしその他状態の伸長カウンタは、直前スロットで採用可能なGPS（位置あり、精度 `GPS_STRETCH_ACCEPT_ACCURACY_M=80m` 以下）を得られた場合だけ進める。GPS欠損または低精度の場合、次回は 5 秒からやり直す。W1時のGPS速度/歩数速度比較で最終表示状態が高速移動へ倒れても、GPSサンプリング制御は `stK / WStatus` ベースのままとする。
-- `trK` が `ON` へ確定遷移した瞬間は、3 秒 base cycle を待たずに GPS burst 要求を開始し、その直後に通常 GPS 更新も 2 秒周期へ張り替える。burst は `requestLocationUpdates()` を `PRIORITY_HIGH_ACCURACY`、`interval=500ms`、`minInterval=100ms`、`maxUpdateAge=500ms`、`duration=10秒`、`maxUpdates=10` で短時間だけ走らせ、`accuracy <= 30m` の良点が来たら即採用して停止する。10秒以内に良点が来なければ、その間の最良点が `accuracy <= 80m` の場合だけ採用し、それより悪い場合は欠損扱いにする。`stK4` 継続中の base cycle では追加の burst を重ねず、2 秒周期の通常 GPS 更新を維持する。
-- GPS burst 要求は `GPS_BURST_START / CANDIDATE / ACCEPT / REJECT / STOP / SKIPPED_COOLDOWN / UNAVAILABLE / SECURITY_ERROR` を debug event として出力する。これにより、加速度トリガー後の GPS 空欄が「要求未発行」なのか「候補が低精度で棄却された」のかをログで区別できるようにする。
-- `trK` ON 遷移、または 3 秒 base cycle で `stK4` へ入った瞬間は、GPS 引き延ばしカウンタを必ず 0 に戻す。
-- `trK` ON 遷移による即時 GPS 取得が発生した場合、または `stK4` へ新規遷移した場合、その事実は状態イベントログの `GpsImmediate=1` として残す。加えて、同じ行に `TrKAvg / TrKRatio / StKAvg / StKRatio` を保存し、後から閾値未達の原因を解析できるようにする。`TrKRatio` は算出不能時に空欄を許容する。
 - `MotionSample` の保存ルーチンは `LoggingConfig.MOTION_LOG_ROUTINE` で切り替える。既定は `NORMAL` とし、現在のアプリ表示が壊れない最小限の列だけを保存する。`FULL` に切り替えた場合は解析用の全列を従来どおり保存する。
-- `stK4` から外れた後、`W1` なら 5 秒周期へ戻る。`stK4` でも `W1` でもない状態なら、引き延ばしカウンタは stK4 中にリセット済みのため 5 秒から再開し、以後は採用可能なGPSを得られたスロットだけ 5 秒ずつ 30 秒まで伸ばす。
-- 実際の GPS 要求張り替えは、短くする方向と mode が変わる場合は即時、同じ mode のまま長くする方向は `GPS_DYNAMIC_INTERVAL_MIN_HOLD_MS=30秒` 以上維持してから行う。
 - `gpsStretchMaxMs` が `0` の場合は、その他状態の GPS 間隔に上限を設けない。`0` 以外の場合は、その値を上限として引き延ばしを止める。初期値は `30000ms` とする。
-- GPS 更新間隔を長くした後でも、`trK=ON` または `stK4` を検知したら待たずに短い間隔へ戻す。
-- GPS 更新間隔を長くする方向の切り替えには最小維持時間を設け、短時間の揺れで頻繁に伸縮しないようにする。
 - GPS の取得周期とファイル保存周期は分離する。
 - GPS は 3 秒スロットごとに集約し、欠損を許容する。
 - 移動中（徒歩 / 高速移動）の GPS 集約規則は次のとおりとする。
@@ -118,7 +225,7 @@ GpsPressureLogger は、Android 端末上で GPS・気圧・歩数を時系列�
 - 気圧は 3 分ごとの記録スロットで最新保持値を採用し、それ以外の主記録行では欠損とする。表示では直近有効な標高・気圧・補正気圧へフォールバックする。
 - 歩数は 3 秒区間の増分を `StepsDelta` とし、初期基準未確定時は `0` から開始してよい。
 
-### 3.2 表示機能
+### 3.3 表示機能
 - ホーム画面で気圧・高度・歩数を統合表示する。
 - グラフは横方向の時間軸操作に対応し、左スワイプでより古い時間帯へ移動できる。
 - グラフはピンチインで期間を広げると、より古い時間帯まで同時に表示できる。
@@ -166,13 +273,13 @@ GpsPressureLogger は、Android 端末上で GPS・気圧・歩数を時系列�
 - 地図画面と地図ウィジェットの折れ線には、長い直線区間だけでなく曲線区間にも `>` 風の進行方向マーカーを差し込み、進行方向を読み取りやすくする。マーカーは丸背景を使わず、モード色の `>` 文字に白い縁取りを付けて表示する。Android アプリ、地図ウィジェット、Windows viewer で同じ描画イメージへ揃える。
 - Windows viewer の `>` 進行方向マーカーは、現在の調整値 `font-size: 16px`、`iconSize: [16, 16]`、`iconAnchor: [8, 8]` を維持する。表示されない不具合を直す場合も、過去の大きすぎる暫定値 `font-size: 30px` / `iconSize: [44, 44]` へ戻してはならない。
 - 地図画面の `>` 風進行方向マーカーも、地理距離ではなく画面距離で間隔を決める。元 GPS 点そのものに置くのではなく、画面上の折れ線距離に沿って一定間隔でサンプリングし、前後のサンプル点から接線角を求める。配置間隔、接線計算距離、始終端スキップ距離は線幅に比例させる。これにより、GPS 点が密な場合やズームアウト時でも、表示可能な長さがあれば方向マーカーを出し、線が太い表示では間隔を長く、線が細い表示では間隔を短くする。
-- 地図画面には、`K/W` 状態ラベルの ON/OFF に加えて、`trK`（GPS 即時取得トリガー）ラベルの ON/OFF も持たせる。`trK` ラベルは `tON` の遷移点だけを表示し、GPS 制御の発火タイミングを後から確認できるようにする。
+- 地図画面には、`K/W` 状態ラベルの ON/OFF に加えて、`trK`（GPS 即時取得トリガー）ラベルの ON/OFF も持たせる。`trK` ラベルは `trK4` に入った遷移点だけを `tON` として表示し、GPS 制御の発火タイミングを後から確認できるようにする。
 - 地図ウィジェットの `>` 風進行方向マーカーは、地理距離ではなくウィジェット bitmap 上の画面距離で間隔を決める。これにより、同じウィジェット内では地図縮尺が変わっても見た目の密度をほぼ一定に保つ。
 - 地図画面と地図ウィジェットの折れ線色は、`DEVICE_STILL=黒 / STOPPED=グレー / WALKING=青 / VEHICLE=赤` で統一し、旧来の赤青グラデーションは使わない。
 - 地図画面と地図ウィジェットの折れ線幅は密度非依存の固定 px ではなく dp 基準で決める。地図ウィジェットは bitmap 全体が launcher の `ImageView` で伸縮される可能性があるため、見やすさを保ちつつ過度に太くならない `2.2dp` 相当を基準に描画する。
-- 地図画面と地図ウィジェットでは、定速領域が継続中でも最新の暫定 `ConstantRegionKind` を使って描画する。`STAY` の区間は保存済みの `ConstantRegionStayLat/Lon` を優先して stay point 1 点へ畳み、`CONSTANT_MOVE` の区間は記録された GPS 点列をそのまま使って描く。
-- 地図系表示のスプライン補間は `STAY` 点を境界として移動区間だけに適用する。`WALKING` と `VEHICLE` は位置軌跡として連続してよいが、`STAY` 点は曲線制御点へ混ぜず停止代表点として別描画する。
-- `STAY` 境界の直前・直後も含め、移動区間は全セグメントをスプライン補間する。ただし `STAY` 自体は補間へ混ぜず、停止代表点として別描画する。
+- 地図画面と地図ウィジェットでは、定速領域が継続中でも最新の暫定 `ConstantRegionKind` を使って描画する。`DEVICE_STILL` または `STOPPED` だけが連続する区間は、両者が交互でも 1 つの停止領域として代表点 1 点へ畳む。代表点は保存済みの `ConstantRegionStayLat/Lon` を優先し、なければ区間平均を使う。旧ログ互換として `ConstantRegionKind=STAY` だけが連続する区間も同じ代表点へ畳む。`CONSTANT_MOVE` の区間は記録された GPS 点列をそのまま使って描く。
+- 地図系表示のスプライン補間は停止代表点を境界として移動区間だけに適用する。`WALKING` と `VEHICLE` は位置軌跡として連続してよいが、停止代表点は曲線制御点へ混ぜず別描画する。
+- 停止代表点の直前・直後も含め、移動区間は全セグメントをスプライン補間する。ただし停止代表点自体は補間へ混ぜず、別描画する。
 - `VEHICLE` 区間は `WALKING` 区間と別チャンクとして扱い、`STAY` 境界がなくてもチャンク内部の補間でオーバーランしないよう折れ線のまま描く。
 - 地図系表示では、`DEVICE_STILL` と `STOPPED` の区間に対して、モードごとの別パラメータで GPS ブレを表示用に抑える停止標準化を既定で適用する。
 - `DEVICE_STILL` の表示補正は、完全停止中の測位ブレを実移動より強く疑う前提で、偏差半径をおよそ `2m` まで強く圧縮する。
@@ -199,7 +306,7 @@ GpsPressureLogger は、Android 端末上で GPS・気圧・歩数を時系列�
 - Windows viewer では、`stepsDelta=0` かつ `VEHICLE` ではない短時間の `復帰バースト` と `偽クラスタ滞在` を前段で検知し、前後の正常クラスタへ戻す表示補正を試験適用できる。
 - Windows viewer の `補正あり` は、Android アプリ本体と地図ウィジェットの固定描画順序 `復帰バースト / 偽クラスタ滞在 / 停止標準化 / GPS 平準化` を再現する。
 - Windows viewer は、標準バックアップ CSV と状態イベントログ CSV (`gps_pressure_motion_events_backup_*.csv`) または旧補助ログ CSV (`gps_pressure_motion_metrics_backup_*.csv`) を読める。状態ログがある場合は `MotionSample` 相当列を時刻順に前方補完し、`DisplayMode`、状態イベントラベル、`trK` ラベルを再構成する。
-- 状態イベントラベルは `STK4` に入った点を `AC`、`STAY` に入った点を `STAY`、`CONSTANT_MOVE` に入った点を `CMOV` と表示する。`trK` ラベルは `ON` に入った点だけ `tON` と表示し、OFF 点は表示しない。`tON` は GPS 欠損補間位置へ配置し、同じ場所付近で短時間に複数回発生した表示上の重複は抑制する。
+- 状態イベントラベルは `STK4` に入った点を `AC`、`STAY` に入った点を `STAY`、`CONSTANT_MOVE` に入った点を `CMOV` と表示する。`trK` ラベルは `trK4` に入った点だけ `tON` と表示し、`trK1 / trK2 / trK3` 点は表示しない。`tON` は GPS 欠損補間位置へ配置し、同じ場所付近で短時間に複数回発生した表示上の重複は抑制する。
 - Windows viewer は、地図上で `K/W` ラベルと `trK` ラベルを個別に ON/OFF できる。
 - Windows viewer は、地図上の軌跡にマウスを重ねたとき、グラフの tooltip と同様に、その位置に最も近い表示点の日時を tooltip 表示する。
 - Windows viewer は、地図上の `DisplayMode` / `K/W` / `trK` を補助ログバックアップ CSV の `MotionSample` 相当列からだけ再構成する。補助ログが無い場合は Android と同様にこれらを推測表示しない。
@@ -208,7 +315,7 @@ GpsPressureLogger は、Android 端末上で GPS・気圧・歩数を時系列�
 - Windows viewer は、ブラウザ表示版に加えて `pywebview` を使った独立アプリ版でも起動できる。
 - 独立アプリ版は表示コンテナだけを差し替えたもので、補正ロジック・グラフ生成・地図生成は HTML 版と同じ dashboard 生成処理を使う。
 
-### 3.3 データ整合性
+### 3.4 データ整合性
 - 端末内の正規データは Room DB とする。
 - `Timestamp` は DB 内で一意とする。
 - import 時は同一 `Timestamp` をマージ対象とし、競合解決はユーザー選択に従う。

@@ -1,6 +1,6 @@
 # pywebview 技術メモ
 
-最終更新: 2026-04-14
+最終更新: 2026-05-06
 
 ## 対象
 
@@ -40,6 +40,8 @@
 - `desktop_app.state` から `step3_visualize` を読む import は、viewer 起動位置に依存しないよう相対 import 優先 / 直接 import fallback にしておく
 - `iframe + file:///...` で dashboard を差し替える構成は、pywebview / WebView2 上で空表示になりやすい
 - 独立 viewer では、生成済み dashboard HTML を `ViewerApi` から文字列で返し、shell 側の `iframe.srcdoc` へ直接流し込む方が安定する
+- 単純な `srcdoc` 再代入だと日付変更後に Chart.js / Leaflet の状態が前回 dashboard を引き継ぐことがあるため、shell では iframe 要素自体を作り直してから `srcdoc` に新しい HTML を入れる
+- 内側 dashboard の日付セレクトを変えても shell が知らないままだと別日のデータが描けないため、内側から `postMessage(type='gpspl-date-change')` で shell へ通知し、shell が `set_date()` 経由で HTML を再生成する
 
 ## 起動確認方法
 

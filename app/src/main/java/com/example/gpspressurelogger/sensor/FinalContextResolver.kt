@@ -30,7 +30,6 @@ class FinalContextResolver {
         activeRegionEstimate?.kind == ConstantRegionKind.STAY && stK == StKStatus.STK1 -> Mode.DEVICE_STILL
         activeRegionEstimate?.kind == ConstantRegionKind.STAY -> Mode.STOPPED
         activeRegion && stK == StKStatus.STK1 -> Mode.DEVICE_STILL
-        activeRegion -> Mode.STOPPED
         stK == StKStatus.STK1 -> Mode.DEVICE_STILL
         stK == StKStatus.STK2 -> Mode.STOPPED
         else -> previousMode

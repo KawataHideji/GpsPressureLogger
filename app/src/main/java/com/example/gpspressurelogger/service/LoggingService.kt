@@ -28,8 +28,8 @@ import com.example.gpspressurelogger.sensor.MotionStateSnapshot
 import com.example.gpspressurelogger.sensor.MovementDetector.Mode
 import com.example.gpspressurelogger.sensor.StKStatus
 import com.example.gpspressurelogger.sensor.StaticMotionStateParamsProvider
-import com.example.gpspressurelogger.sensor.TrKSnapshot
 import com.example.gpspressurelogger.sensor.TrKStatus
+import com.example.gpspressurelogger.sensor.TrKTransitionSnapshot
 import com.example.gpspressurelogger.util.ExportUtil
 import com.example.gpspressurelogger.util.GpsUtil
 import com.example.gpspressurelogger.util.LoggingConfig
@@ -108,8 +108,8 @@ class LoggingService : Service(), SensorEventListener {
             ExportUtil.writeDebugLog(this, "STEP_RESET: 歩数をリセットしました")
         },
         onTrKChanged = { snapshot ->
-            ExportUtil.writeVerboseDebugLog(this, "TRK_CHANGED: ${snapshot.status}")
-            if (snapshot.status == TrKStatus.ON) {
+            ExportUtil.writeVerboseDebugLog(this, "TRK_CHANGED: ${snapshot.trK.status}")
+            if (snapshot.trK.status == TrKStatus.TRK4) {
                 serviceScope.launch {
                     handleTrKTransitionGps(snapshot)
                 }
@@ -475,24 +475,30 @@ class LoggingService : Service(), SensorEventListener {
         return true
     }
 
-    private fun handleTrKTransitionGps(snapshot: TrKSnapshot) {
+    private fun handleTrKTransitionGps(snapshot: TrKTransitionSnapshot) {
+        val trK = snapshot.trK
+        val stK = snapshot.stK
         val params = motionStateParamsProvider.current()
         updateGpsRequest(
             mode = Mode.VEHICLE,
             targetIntervalMs = params.gpsKMinMs,
             immediate = true,
-            referenceTimestampMs = snapshot.timestampMs,
+            referenceTimestampMs = trK.timestampMs,
             force = true,
             forceImmediate = true
         )
-        val avgText = snapshot.avg?.let { String.format("%.3f", it) } ?: "null"
-        val ratioText = snapshot.directionalityRatio?.let { String.format("%.3f", it) } ?: "null"
+        val avgText = trK.avg?.let { String.format("%.3f", it) } ?: "null"
+        val ratioText = trK.directionalityRatio?.let { String.format("%.3f", it) } ?: "null"
+        val stKAvgText = stK.avg?.let { String.format("%.3f", it) } ?: "null"
+        val stKRatioText = stK.directionalityRatio?.let { String.format("%.3f", it) } ?: "null"
         ExportUtil.writeDebugLog(
             this,
-            "TRK_GPS_IMMEDIATE: ts=${snapshot.timestampMs} intervalSec=${params.gpsKMinMs / 1000.0} " +
-                "trK=${snapshot.status} TrKAvg=$avgText TrKRatio=$ratioText " +
-                "TrKAvgThreshold=${params.trKAvgThreshold} TrKRatioThreshold=${params.trKRatioThreshold} " +
-                "accelSource=${snapshot.source}"
+            "TRK_GPS_IMMEDIATE: ts=${trK.timestampMs} intervalSec=${params.gpsKMinMs / 1000.0} " +
+                "trK=${trK.status} stK=${stK.status} TrKAvg=$avgText TrKRatio=$ratioText " +
+                "StKAvg=$stKAvgText StKRatio=$stKRatioText " +
+                "TrKAvgThreshold=${params.trKAvgThreshold} TrKAvgUpperThreshold=${params.trKAvgUpperThreshold} " +
+                "TrKRatioThreshold=${params.trKRatioThreshold} " +
+                "accelSource=${trK.source} stKAccelSource=${stK.source}"
         )
     }
 
@@ -750,6 +756,7 @@ class LoggingService : Service(), SensorEventListener {
     ): MotionSample {
         val normalizedStepDelta = stepDelta3s?.coerceAtLeast(0)
         val region = snapshot.completedRegion ?: snapshot.activeRegionEstimate
+        val trK = snapshot.trKImmediate?.trK ?: snapshot.trK
         return MotionSample(
             timestamp = slotTimestamp,
             stepDelta3s = normalizedStepDelta,
@@ -757,10 +764,10 @@ class LoggingService : Service(), SensorEventListener {
             kRawStatus = snapshot.stK.rawStatus.name,
             kAvg = snapshot.stK.avg,
             kDirectionalityRatio = snapshot.stK.directionalityRatio,
-            trKStatus = snapshot.trK.status.name,
-            trKRawStatus = snapshot.trK.rawStatus.name,
-            trKAvg = snapshot.trK.avg,
-            trKDirectionalityRatio = snapshot.trK.directionalityRatio,
+            trKStatus = trK.status.name,
+            trKRawStatus = trK.rawStatus.name,
+            trKAvg = trK.avg,
+            trKDirectionalityRatio = trK.directionalityRatio,
             wStatus = snapshot.wStatus.status.name,
             stepDeltaWindow = snapshot.wStatus.stepDeltaWindow,
             gpsIntervalMs = snapshot.gpsSampling.intervalMs,
@@ -784,6 +791,7 @@ class LoggingService : Service(), SensorEventListener {
     ): MotionSample {
         val normalizedStepDelta = stepDelta3s?.coerceAtLeast(0)
         val stepRate3s = normalizedStepDelta?.div(LoggingConfig.SLOT_INTERVAL_SECONDS)
+        val trK = snapshot.trKImmediate?.trK ?: snapshot.trK
 
         // 確定した結果があればそれを、なければ現在の暫定推計（active）を保存する。
         // confirmedMode には確定済みの状態だけを入れ、現在進行中の暫定停止は混ぜない。
@@ -802,15 +810,15 @@ class LoggingService : Service(), SensorEventListener {
             kMaxMagnitude = snapshot.stK.maxMagnitude,
             kConfidence = snapshot.stK.confidence,
             kAccelSource = snapshot.stK.source.name,
-            trKStatus = snapshot.trK.status.name,
-            trKRawStatus = snapshot.trK.rawStatus.name,
-            trKAvg = snapshot.trK.avg,
-            trKScalarAvg = snapshot.trK.scalarAvg,
-            trKDirectionalityRatio = snapshot.trK.directionalityRatio,
-            trKMaxMagnitude = snapshot.trK.maxMagnitude,
-            trKHorizontalMaxMagnitude = snapshot.trK.horizontalMaxMagnitude,
-            trKConfidence = snapshot.trK.confidence,
-            trKAccelSource = snapshot.trK.source.name,
+            trKStatus = trK.status.name,
+            trKRawStatus = trK.rawStatus.name,
+            trKAvg = trK.avg,
+            trKScalarAvg = trK.scalarAvg,
+            trKDirectionalityRatio = trK.directionalityRatio,
+            trKMaxMagnitude = trK.maxMagnitude,
+            trKHorizontalMaxMagnitude = trK.horizontalMaxMagnitude,
+            trKConfidence = trK.confidence,
+            trKAccelSource = trK.source.name,
             wStatus = snapshot.wStatus.status.name,
             stepDeltaWindow = snapshot.wStatus.stepDeltaWindow,
             gpsIntervalMs = snapshot.gpsSampling.intervalMs,

@@ -40,9 +40,10 @@ fun MapScreen(
     onBack: () -> Unit,
     viewModel: MapViewModel = viewModel()
 ) {
-    val entries by viewModel.entries.collectAsState()
-    val motionSamples by viewModel.motionSamples.collectAsState()
-    val targetDateStart by viewModel.targetDateStart.collectAsState()
+    val mapUiState by viewModel.mapUiState.collectAsState()
+    val entries = mapUiState.entries
+    val motionSamples = mapUiState.motionSamples
+    val targetDateStart = mapUiState.targetDateStart
     val dateFormatter = remember { SimpleDateFormat("yyyy年M月d日", Locale.JAPAN) }
     var lastAutoFitTarget by remember { mutableLongStateOf(Long.MIN_VALUE) }
     var lastEmptyResetTarget by remember { mutableLongStateOf(Long.MIN_VALUE) }
@@ -142,6 +143,7 @@ fun MapScreen(
                         mapView.controller.setZoom(12.0)
                         mapView.controller.setCenter(GeoPoint(35.6812, 139.7671))
                         lastRenderSignature = null
+                        mapView.invalidate()
                     }
                     lastEmptyResetTarget = targetDateStart
                 }
@@ -190,14 +192,15 @@ fun MapScreen(
                             mapView.overlays.clear()
                             renderMapOverlays(mapView, displayEntries, motionSamples, showStateLabels, showTrkLabels)
                             lastRenderSignature = renderSignature
+                            mapView.invalidate()
                         }
                     } else {
                         mapView.overlays.clear()
                         renderMapOverlays(mapView, displayEntries, motionSamples, showStateLabels, showTrkLabels)
                         lastRenderSignature = renderSignature
+                        mapView.invalidate()
                     }
                 }
-                mapView.invalidate()
             }
         )
     }
