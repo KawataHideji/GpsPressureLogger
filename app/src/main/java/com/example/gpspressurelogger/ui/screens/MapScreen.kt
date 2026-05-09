@@ -22,6 +22,10 @@ import android.graphics.Typeface
 import android.content.res.Resources
 import com.example.gpspressurelogger.ui.viewmodel.MapViewModel
 import com.example.gpspressurelogger.util.GpsUtil
+import kotlinx.coroutines.delay
+import org.osmdroid.events.MapListener
+import org.osmdroid.events.ScrollEvent
+import org.osmdroid.events.ZoomEvent
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -33,6 +37,10 @@ import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
 import com.example.gpspressurelogger.data.LogEntry
 import com.example.gpspressurelogger.data.MotionSample
+
+// パン・ズームの最後のイベントから何 ms 静音だったら「操作終了」とみなすか。
+// 短すぎるとジェスチャ最中のわずかな間隙で再描画が走り、長すぎると操作後の更新が遅れる。
+private const val MAP_INTERACTION_QUIET_MS: Long = 600L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -50,6 +58,18 @@ fun MapScreen(
     var lastRenderSignature by remember { mutableStateOf<MapRenderSignature?>(null) }
     var showStateLabels by remember { mutableStateOf(false) }
     var showTrkLabels by remember { mutableStateOf(false) }
+    // パン・ズーム最終時刻と「操作終了後の再描画キック」用カウンタ。
+    // MapListener から lastInteractionMs を更新し、LaunchedEffect が静音期間後に
+    // postInteractionTick をインクリメントして AndroidView の update を再起動させる。
+    var lastInteractionMs by remember { mutableLongStateOf(0L) }
+    var postInteractionTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(lastInteractionMs) {
+        if (lastInteractionMs > 0L) {
+            // 静音時間 + 余裕分待ってから再描画チャンスを与える。
+            delay(MAP_INTERACTION_QUIET_MS + 100L)
+            postInteractionTick += 1
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -130,9 +150,27 @@ fun MapScreen(
                     setMultiTouchControls(true)
                     controller.setZoom(12.0)
                     controller.setCenter(GeoPoint(35.6812, 139.7671))
+                    // パン・ズーム検知：操作開始時刻を記録し、live refresh による割り込み再描画を一時抑止する。
+                    addMapListener(object : MapListener {
+                        override fun onScroll(event: ScrollEvent?): Boolean {
+                            lastInteractionMs = System.currentTimeMillis()
+                            return false
+                        }
+                        override fun onZoom(event: ZoomEvent?): Boolean {
+                            lastInteractionMs = System.currentTimeMillis()
+                            return false
+                        }
+                    })
                 }
             },
             update = { mapView ->
+                // postInteractionTick の読み取り：操作終了後にこの値が変わると update が再実行され、
+                // 直前の live refresh emit による未描画状態を遅延描画できる。
+                @Suppress("UNUSED_VARIABLE")
+                val tick = postInteractionTick
+                val nowMs = System.currentTimeMillis()
+                val isInteracting = lastInteractionMs > 0L &&
+                    (nowMs - lastInteractionMs) < MAP_INTERACTION_QUIET_MS
                 val entriesReadyForTarget = entriesMatchTargetDay(entries, targetDateStart)
 
                 if (!entriesReadyForTarget && lastEmptyResetTarget != targetDateStart) {
@@ -158,6 +196,13 @@ fun MapScreen(
                         showTrkLabels = showTrkLabels
                     )
                     if (lastRenderSignature == renderSignature && lastAutoFitTarget == targetDateStart) {
+                        return@AndroidView
+                    }
+
+                    // パン・ズーム中は再描画を遅延させて操作のがたつきを防ぐ。
+                    // ただし初回描画（lastRenderSignature == null）は無条件で行う。
+                    // 静音期間後に LaunchedEffect が postInteractionTick を進めて update を再実行する。
+                    if (isInteracting && lastRenderSignature != null) {
                         return@AndroidView
                     }
 
