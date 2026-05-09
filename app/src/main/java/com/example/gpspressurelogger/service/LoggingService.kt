@@ -271,44 +271,41 @@ class LoggingService : Service(), SensorEventListener {
     }
 
     override fun onSensorChanged(event: SensorEvent) {
+        // 加速度系（LinearAccel / Rotation / Magnetic / Accel）は trK / stK 検出のキモであり、
+        // motionScope.launch によるジョブ蓄積で OOM の原因になっていた経路。これらは
+        // AccelManager 内部が `synchronized(this)` でスレッドセーフなので、Android の sensor
+        // スレッドから直接呼び出して取りこぼしゼロ・遅延ゼロにする。
+        // 歩数系・GPS は元のまま motionScope.launch 経由（数秒に1回〜数Hzの低頻度なのでジョブ蓄積を起こさない）。
         when (event.sensor.type) {
             Sensor.TYPE_PRESSURE -> lastPressure = event.values[0]
             Sensor.TYPE_LINEAR_ACCELERATION -> {
-                val ax = event.values[0]
-                val ay = event.values[1]
-                val az = event.values[2]
-                val timestampMs = System.currentTimeMillis()
-                motionScope.launch {
-                    motionStateManager.addLinearAccelerationSample(ax, ay, az, timestampMs)
-                }
+                motionStateManager.addLinearAccelerationSample(
+                    event.values[0],
+                    event.values[1],
+                    event.values[2],
+                    System.currentTimeMillis()
+                )
             }
             Sensor.TYPE_ROTATION_VECTOR -> {
-                val values = event.values.copyOf()
-                motionScope.launch {
-                    motionStateManager.updateRotationVector(values)
-                }
+                motionStateManager.updateRotationVector(event.values.copyOf())
             }
             Sensor.TYPE_MAGNETIC_FIELD -> {
-                val mx = event.values[0]
-                val my = event.values[1]
-                val mz = event.values[2]
-                motionScope.launch {
-                    motionStateManager.updateMagneticField(mx, my, mz)
-                }
+                motionStateManager.updateMagneticField(
+                    event.values[0],
+                    event.values[1],
+                    event.values[2]
+                )
             }
             Sensor.TYPE_ACCELEROMETER -> {
                 val ax = event.values[0]
                 val ay = event.values[1]
                 val az = event.values[2]
-                val timestampMs = System.currentTimeMillis()
-                motionScope.launch {
-                    if (rotationVectorSensor == null) {
-                        motionStateManager.updateOrientationAcceleration(ax, ay, az)
-                    }
-                    if (linearAccelerationSensor == null) {
-                        val motionNorm = abs(sqrt(ax * ax + ay * ay + az * az) - GRAVITY_MPS2)
-                        motionStateManager.addAccelerationNormSample(motionNorm, timestampMs)
-                    }
+                if (rotationVectorSensor == null) {
+                    motionStateManager.updateOrientationAcceleration(ax, ay, az)
+                }
+                if (linearAccelerationSensor == null) {
+                    val motionNorm = abs(sqrt(ax * ax + ay * ay + az * az) - GRAVITY_MPS2)
+                    motionStateManager.addAccelerationNormSample(motionNorm, System.currentTimeMillis())
                 }
             }
             Sensor.TYPE_STEP_COUNTER -> {
