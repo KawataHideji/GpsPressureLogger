@@ -507,7 +507,15 @@ class LoggingService : Service(), SensorEventListener {
         )
     }
 
+    @Synchronized
     private fun requestBurstLocationIfDue(nowMs: Long, cooldownMs: Long, force: Boolean = false) {
+        // serviceScope は Dispatchers.IO（プール）上で動くため、processSamplingSlot 経由の updateGpsRequest と
+        // handleTrKTransitionGps からの呼び出しが別スレッドで同時に走り得る。
+        // 同期化しないと cooldown チェック → stopBurstGps → callback 設定 → timeoutJob 設定 の各ステップで
+        // 後勝ちが発生し、片方の LocationCallback が orphan になって fusedLocationClient に残り続けるため、
+        // メソッド全体を @Synchronized で逐次化する。
+        // 内部で呼ぶ stopBurstGps / handleBurstGpsCandidate / finalizeBurstGps / acceptBurstGps も @Synchronized
+        // だが、Java の synchronized はリエントラントなので同一スレッドからの再取得は問題ない。
         val effectiveCooldownMs = cooldownMs.coerceAtLeast(LoggingConfig.GPS_MIN_INTERVAL_MS)
         if (!force && nowMs - lastBurstGpsRequestMs < effectiveCooldownMs) {
             ExportUtil.writeDebugLog(
