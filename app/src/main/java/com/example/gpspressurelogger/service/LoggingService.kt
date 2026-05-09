@@ -97,7 +97,15 @@ class LoggingService : Service(), SensorEventListener {
     private val motionDispatcher = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "MotionStateManager")
     }.asCoroutineDispatcher()
-    private val motionScope = CoroutineScope(SupervisorJob() + motionDispatcher)
+    // motionScope.launch 内で例外が発生したとき、SupervisorJob だけでは個別 Job をキャンセルするだけで
+    // 例外がデフォルトハンドラに到達して別経路の挙動を変えないよう、明示的に握り潰してログだけ残す。
+    // motionStateManager 側の状態を巻き戻すロールバック処理が無い以上、握り潰しは妥当な選択。
+    private val motionExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        Log.e(TAG, "MotionScope coroutine failed", throwable)
+        // ローカル debug log にも残し、長期実機ログから OOM / NPE 系を後追いできるようにする。
+        runCatching { ExportUtil.writeDebugLog(this, "MOTION_SCOPE_EXCEPTION: ${throwable.javaClass.simpleName}: ${throwable.message}") }
+    }
+    private val motionScope = CoroutineScope(SupervisorJob() + motionDispatcher + motionExceptionHandler)
     private val motionStateParamsProvider = StaticMotionStateParamsProvider()
     private val motionStateManager = MotionStateManager(
         paramsProvider = motionStateParamsProvider,
