@@ -283,7 +283,12 @@ object ExportUtil {
 
     fun enqueueEntryToLocalCsv(context: Context, entry: LogEntry) {
         synchronized(csvQueueLock) {
-            flushEntryQueueForDayBoundaryLocked(context, entry.timestamp)
+            // 日付境界 flush で予期しない例外が出ても、新しいエントリがキューから silent drop されないようにする。
+            try {
+                flushEntryQueueForDayBoundaryLocked(context, entry.timestamp)
+            } catch (e: Throwable) {
+                writeLocalDebugLog(context, "CSV_DAY_FLUSH_FAILED: kind=entry msg=${e.message}")
+            }
             pendingEntryQueue.addLast(entry)
             if (pendingEntryQueue.size >= LoggingConfig.CSV_FLUSH_QUEUE_SIZE) {
                 flushEntryQueueLocked(context)
@@ -295,7 +300,11 @@ object ExportUtil {
 
     fun enqueueMotionSampleToLocalCsv(context: Context, sample: MotionSample) {
         synchronized(csvQueueLock) {
-            flushMotionQueueForDayBoundaryLocked(context, sample.timestamp)
+            try {
+                flushMotionQueueForDayBoundaryLocked(context, sample.timestamp)
+            } catch (e: Throwable) {
+                writeLocalDebugLog(context, "CSV_DAY_FLUSH_FAILED: kind=motion msg=${e.message}")
+            }
             pendingMotionQueue.addLast(sample)
             if (pendingMotionQueue.size >= LoggingConfig.CSV_FLUSH_QUEUE_SIZE) {
                 flushMotionQueueLocked(context)

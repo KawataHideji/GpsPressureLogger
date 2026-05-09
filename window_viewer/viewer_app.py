@@ -46,7 +46,11 @@ def main():
         min_size=(1180, 800),
         text_select=True,
     )
-    webview.start()
+    try:
+        webview.start()
+    finally:
+        # webview ループ終了後に tile proxy を必ず止め、ポートとスレッドを解放する。
+        state.shutdown()
 
 
 if __name__ == "__main__":

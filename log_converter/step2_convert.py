@@ -29,7 +29,8 @@ def merge_record(target, incoming):
 
 
 def read_jsonl(path: Path):
-    with path.open("r", encoding="utf-8") as handle:
+    # 上流が utf-8 / utf-8-sig どちらで書き出していても読めるよう sig 版を使う。
+    with path.open("r", encoding="utf-8-sig") as handle:
         for line in handle:
             line = line.strip()
             if not line:

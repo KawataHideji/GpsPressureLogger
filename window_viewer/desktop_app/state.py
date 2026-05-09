@@ -74,6 +74,15 @@ class ViewerState:
             self.tile_proxy = TileProxyServer(cache_dir=cache_dir)
         return self.tile_proxy
 
+    def shutdown(self) -> None:
+        # アプリ終了時に呼び、tile proxy のソケットとスレッドを明示的に閉じる。
+        if self.tile_proxy is not None:
+            try:
+                self.tile_proxy.shutdown()
+            except Exception:
+                pass
+            self.tile_proxy = None
+
     def _file_signature(self, path: Path | None) -> tuple | None:
         if path is None:
             return None

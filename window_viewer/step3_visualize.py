@@ -1,5 +1,6 @@
 import argparse
 import csv
+import html
 import json
 import os
 import re
@@ -689,6 +690,11 @@ def create_step_series(rows, target_times):
 
 
 def interpolate_linear(x_values, y_values, x_target):
+    # 0 / 1 要素や、x が単調でない呼び出しに対しても IndexError を起こさないようにする。
+    if not x_values or not y_values:
+        return None
+    if len(x_values) == 1 or len(y_values) == 1:
+        return y_values[0]
     if x_target <= x_values[0]:
         return y_values[0]
     if x_target >= x_values[-1]:
@@ -1487,16 +1493,19 @@ def build_dashboard_payload(mode_data, events_by_date, summary, initial_correcti
         "dateKeys": date_keys,
         "initialDateKey": initial_date_key,
     }
-    return json.dumps(payload, ensure_ascii=False)
+    # `</script>` がペイロード文字列に含まれていても <script> タグから抜け出せないようにエスケープする。
+    # `<` を `<` に置き換えれば `</script>` は `</script>` となり、JSON 値としてはそのまま等価。
+    return json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
 
 
 def render_dashboard_html(payload_json: str, title: str, tile_url_template: str) -> str:
+    safe_title = html.escape(title, quote=True)
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title}</title>
+  <title>{safe_title}</title>
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -1732,7 +1741,7 @@ def render_dashboard_html(payload_json: str, title: str, tile_url_template: str)
 <body>
   <div class="page">
     <div class="header">
-      <h1>{title}</h1>
+      <h1>{safe_title}</h1>
       <p>コメント付きバックアップ CSV をそのまま読み込み、地図とグラフをまとめて確認します。</p>
       <div class="toolbar">
         <label for="dateKey">日付</label>

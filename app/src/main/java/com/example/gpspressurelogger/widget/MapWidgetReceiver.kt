@@ -244,21 +244,23 @@ class MapWidgetReceiver : AppWidgetProvider() {
             if (cacheFile.exists() && System.currentTimeMillis() - cacheFile.lastModified() < 86400000L) {
                 return BitmapFactory.decodeFile(cacheFile.absolutePath)
             }
+            var conn: HttpURLConnection? = null
             return try {
-                val conn = URL("https://tile.openstreetmap.org/$zoom/$x/$y.png").openConnection() as HttpURLConnection
+                conn = URL("https://tile.openstreetmap.org/$zoom/$x/$y.png").openConnection() as HttpURLConnection
                 conn.setRequestProperty("User-Agent", "GpsPressureLogger/1.0")
                 conn.connectTimeout = 5000
                 if (conn.responseCode != 200) {
-                    conn.disconnect()
                     return null
                 }
                 val bmp = conn.inputStream.use { BitmapFactory.decodeStream(it) }
-                conn.disconnect()
                 bmp?.also {
                     FileOutputStream(cacheFile).use { out -> it.compress(Bitmap.CompressFormat.PNG, 90, out) }
                 }
             } catch (e: Exception) {
                 null
+            } finally {
+                // 例外経路・正常経路のいずれでも必ず close する。
+                conn?.disconnect()
             }
         }
 

@@ -29,7 +29,8 @@ class SplineInterpolator(private val x: DoubleArray, private val y: DoubleArray)
         // 線形補間式: y = y0 + (y1 - y0) * (x - x0) / (x1 - x0)
         val x0 = x[i]; val y0 = y[i]
         val x1 = x[i + 1]; val y1 = y[i + 1]
-        
+        // 同一 x（重複タイムスタンプ）が連続している場合は左端値を返し、0 除算と NaN 伝播を避ける。
+        if (x1 == x0) return y0
         return y0 + (y1 - y0) * (xVal - x0) / (x1 - x0)
     }
 
