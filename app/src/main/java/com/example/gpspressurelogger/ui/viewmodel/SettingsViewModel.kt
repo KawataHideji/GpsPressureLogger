@@ -36,9 +36,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val importFileUri: StateFlow<String?> = settings.importFileUri
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    val motionImportFileUri: StateFlow<String?> = settings.motionImportFileUri
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
-
     val debugLogFileUri: StateFlow<String?> = settings.debugLogFileUri
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
@@ -68,10 +65,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun setImportFileUri(value: String?) = viewModelScope.launch {
         settings.setImportFileUri(value)
-    }
-
-    fun setMotionImportFileUri(value: String?) = viewModelScope.launch {
-        settings.setMotionImportFileUri(value)
     }
 
     fun setDebugLogFileUri(value: String?) = viewModelScope.launch {
@@ -108,16 +101,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun exportToUri(fileUri: Uri) = viewModelScope.launch {
-        Toast.makeText(getApplication(), "エクスポートを開始します...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(getApplication(), "標準データのエクスポートを開始します...", Toast.LENGTH_SHORT).show()
         val success = withContext(Dispatchers.IO) {
             ExportUtil.writeLocalDebugLog(getApplication(), "EXPORT_STANDARD_STARTED uri=$fileUri")
             try {
                 val entryCount = db.logDao().countSince(0L)
+                val motionCount = db.motionSampleDao().countSince(0L)
                 ExportUtil.writeLocalDebugLog(
                     getApplication(),
-                    "EXPORT_STANDARD_REQUESTED uri=$fileUri rows=$entryCount"
+                    "EXPORT_STANDARD_REQUESTED uri=$fileUri entries=$entryCount motion=$motionCount"
                 )
-                ExportUtil.writeEntriesToUriPaged(getApplication(), fileUri, db)
+                ExportUtil.writeStandardBackupToUri(getApplication(), fileUri, db)
             } catch (e: Throwable) {
                 ExportUtil.writeLocalDebugLog(
                     getApplication(),
@@ -127,35 +121,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             }
         }
         if (success) {
-            Toast.makeText(getApplication(), "エクスポートが完了しました", Toast.LENGTH_SHORT).show()
+            Toast.makeText(getApplication(), "標準データのエクスポートが完了しました", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(getApplication(), "エクスポートに失敗しました", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    fun exportMotionSamplesToUri(fileUri: Uri) = viewModelScope.launch {
-        Toast.makeText(getApplication(), "状態イベントログのエクスポートを開始します...", Toast.LENGTH_SHORT).show()
-        val success = withContext(Dispatchers.IO) {
-            ExportUtil.writeLocalDebugLog(getApplication(), "EXPORT_MOTION_STARTED uri=$fileUri")
-            try {
-                val sampleCount = db.motionSampleDao().countSince(0L)
-                ExportUtil.writeLocalDebugLog(
-                    getApplication(),
-                    "EXPORT_MOTION_REQUESTED uri=$fileUri rows=$sampleCount"
-                )
-                ExportUtil.writeMotionSamplesToUriPaged(getApplication(), fileUri, db)
-            } catch (e: Throwable) {
-                ExportUtil.writeLocalDebugLog(
-                    getApplication(),
-                    "EXPORT_MOTION_FAILED uri=$fileUri reason=query:${e.javaClass.simpleName}:${e.message ?: "unknown"}"
-                )
-                false
-            }
-        }
-        if (success) {
-            Toast.makeText(getApplication(), "状態イベントログのエクスポートが完了しました", Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(getApplication(), "状態イベントログのエクスポートに失敗しました", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -206,47 +174,4 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun triggerMotionImport(overwrite: Boolean) = viewModelScope.launch {
-        val fileUri = settings.motionImportFileUri.first() ?: return@launch
-
-        Toast.makeText(getApplication(), "補助ログのインポートを開始します...", Toast.LENGTH_SHORT).show()
-
-        var lastToastTime = 0L
-        val report = withContext(Dispatchers.IO) {
-            ExportUtil.importMotionSamplesFromUriWithProgress(getApplication(), Uri.parse(fileUri), overwrite) { fileName, currentCount ->
-                val now = System.currentTimeMillis()
-                if (now - lastToastTime > 10_000L) {
-                    viewModelScope.launch(Dispatchers.Main) {
-                        Toast.makeText(getApplication(), "補助ログ読込中: $fileName\n合計: $currentCount 件", Toast.LENGTH_SHORT).show()
-                    }
-                    lastToastTime = now
-                }
-            }
-        }
-
-        if (report.processedFiles > 0 || report.hasIssues) {
-            val issueSummary = buildString {
-                if (report.skippedFiles.isNotEmpty()) append("\nスキップ: ${report.skippedFiles.size} 件")
-                if (report.parseErrors.isNotEmpty()) append("\n解析エラー: ${report.parseErrors.size} 件")
-            }
-            Toast.makeText(
-                getApplication(),
-                "補助ログ import 完了: ${report.importedCount} レコード$issueSummary",
-                Toast.LENGTH_LONG
-            ).show()
-            ExportUtil.writeDebugLog(
-                getApplication(),
-                "MOTION_IMPORT_DONE: imported=${report.importedCount}, files=${report.processedFiles}, skipped=${report.skippedFiles.size}, parseErrors=${report.parseErrors.size}"
-            )
-            report.skippedFiles.take(10).forEach { issue ->
-                ExportUtil.writeDebugLog(getApplication(), "MOTION_IMPORT_SKIP: ${issue.fileName} ${issue.message}")
-            }
-            report.parseErrors.take(20).forEach { issue ->
-                val linePart = issue.lineNumber?.let { " line=$it" } ?: ""
-                ExportUtil.writeDebugLog(getApplication(), "MOTION_IMPORT_PARSE_ERROR: ${issue.fileName}$linePart ${issue.message}")
-            }
-        } else {
-            Toast.makeText(getApplication(), "補助ログ import でエラーが発生しました", Toast.LENGTH_LONG).show()
-        }
-    }
 }

@@ -29,8 +29,6 @@ class SettingsRepository(private val context: Context) {
         val KEY_WIDGET_TRANSPARENCY = intPreferencesKey("widget_transparency")
         /** import 用の標準バックアップ CSV URI */
         val KEY_IMPORT_FILE_URI = stringPreferencesKey("import_file_uri")
-        /** import 用の補助センサー判定ログ CSV URI */
-        val KEY_MOTION_IMPORT_FILE_URI = stringPreferencesKey("motion_import_file_uri")
         /** Drive デバッグログ出力先ファイル URI */
         val KEY_DEBUG_LOG_FILE_URI = stringPreferencesKey("debug_log_file_uri")
         /** Google Drive へのデバッグログ送信 */
@@ -70,9 +68,6 @@ class SettingsRepository(private val context: Context) {
     val importFileUri: Flow<String?> = context.dataStore.data
         .map { it[KEY_IMPORT_FILE_URI] }
 
-    val motionImportFileUri: Flow<String?> = context.dataStore.data
-        .map { it[KEY_MOTION_IMPORT_FILE_URI] }
-
     val debugLogFileUri: Flow<String?> = context.dataStore.data
         .map { it[KEY_DEBUG_LOG_FILE_URI] }
 
@@ -109,13 +104,6 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit {
             if (value == null) it.remove(KEY_IMPORT_FILE_URI)
             else it[KEY_IMPORT_FILE_URI] = value
-        }
-    }
-
-    suspend fun setMotionImportFileUri(value: String?) {
-        context.dataStore.edit {
-            if (value == null) it.remove(KEY_MOTION_IMPORT_FILE_URI)
-            else it[KEY_MOTION_IMPORT_FILE_URI] = value
         }
     }
 

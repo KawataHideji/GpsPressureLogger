@@ -5,21 +5,9 @@ package com.example.gpspressurelogger.util
  * 実装側では、散在した直値ではなく本オブジェクトを参照する。
  */
 object LoggingConfig {
-    enum class MotionLogRoutine {
-        NORMAL,
-        FULL
-    }
-
     const val SLOT_INTERVAL_MS = 3_000L
     const val SLOT_INTERVAL_SECONDS = SLOT_INTERVAL_MS / 1000f
     const val PRESSURE_RECORD_INTERVAL_MS = 3 * 60_000L
-
-    /**
-     * MotionSample の保存内容を切り替える。
-     * NORMAL: 現在のアプリ表示が壊れない最小限のみ保存
-     * FULL:   解析用の全項目を保存
-     */
-    val MOTION_LOG_ROUTINE = MotionLogRoutine.NORMAL
 
     const val GPS_ACCURACY_THRESHOLD_M = 100f
     const val GPS_MIN_INTERVAL_MS = 1_000L

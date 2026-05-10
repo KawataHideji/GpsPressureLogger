@@ -162,10 +162,6 @@ class LoggingService : Service(), SensorEventListener {
         settings = SettingsRepository(this)
 
         ExportUtil.writeDebugLog(this, "SERVICE_CREATE: サービスを開始しました")
-        ExportUtil.writeDebugLog(
-            this,
-            "MOTION_LOG_ROUTINE: ${LoggingConfig.MOTION_LOG_ROUTINE.name}"
-        )
 
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         pressureSensor      = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
@@ -778,99 +774,22 @@ class LoggingService : Service(), SensorEventListener {
     private fun buildMotionSample(
         slotTimestamp: Long,
         snapshot: MotionStateSnapshot,
-        stepDelta3s: Int?
-    ): MotionSample =
-        when (LoggingConfig.MOTION_LOG_ROUTINE) {
-            LoggingConfig.MotionLogRoutine.NORMAL ->
-                buildNormalMotionSample(slotTimestamp, snapshot, stepDelta3s)
-            LoggingConfig.MotionLogRoutine.FULL ->
-                buildFullMotionSample(slotTimestamp, snapshot, stepDelta3s)
-        }
-
-    private fun buildNormalMotionSample(
-        slotTimestamp: Long,
-        snapshot: MotionStateSnapshot,
-        stepDelta3s: Int?
+        @Suppress("UNUSED_PARAMETER") stepDelta3s: Int?
     ): MotionSample {
-        val normalizedStepDelta = stepDelta3s?.coerceAtLeast(0)
         val region = snapshot.completedRegion ?: snapshot.activeRegionEstimate
         val trK = snapshot.trKImmediate?.trK ?: snapshot.trK
         return MotionSample(
             timestamp = slotTimestamp,
-            stepDelta3s = normalizedStepDelta,
-            kStatus = snapshot.stK.status.name,
-            kRawStatus = snapshot.stK.rawStatus.name,
-            kAvg = snapshot.stK.avg,
-            kDirectionalityRatio = snapshot.stK.directionalityRatio,
+            stKStatus = snapshot.stK.status.name,
             trKStatus = trK.status.name,
-            trKRawStatus = trK.rawStatus.name,
-            trKAvg = trK.avg,
-            trKDirectionalityRatio = trK.directionalityRatio,
             wStatus = snapshot.wStatus.status.name,
             stepDeltaWindow = snapshot.wStatus.stepDeltaWindow,
-            gpsIntervalMs = snapshot.gpsSampling.intervalMs,
             gpsImmediate = snapshot.gpsSampling.immediate,
             confirmedMode = if (snapshot.finalModeConfirmed) snapshot.finalMode.name else null,
             constantRegionKind = region?.kind?.name,
             constantRegionSpeedKmh = region?.averageSpeedKmh,
-            constantRegionStartLat = region?.startPoint?.latitude,
-            constantRegionStartLon = region?.startPoint?.longitude,
-            constantRegionEndLat = region?.endPoint?.latitude,
-            constantRegionEndLon = region?.endPoint?.longitude,
             constantRegionStayLat = region?.stayPoint?.latitude,
             constantRegionStayLon = region?.stayPoint?.longitude
-        )
-    }
-
-    private fun buildFullMotionSample(
-        slotTimestamp: Long,
-        snapshot: MotionStateSnapshot,
-        stepDelta3s: Int?
-    ): MotionSample {
-        val normalizedStepDelta = stepDelta3s?.coerceAtLeast(0)
-        val stepRate3s = normalizedStepDelta?.div(LoggingConfig.SLOT_INTERVAL_SECONDS)
-        val trK = snapshot.trKImmediate?.trK ?: snapshot.trK
-
-        // 確定した結果があればそれを、なければ現在の暫定推計（active）を保存する。
-        // confirmedMode には確定済みの状態だけを入れ、現在進行中の暫定停止は混ぜない。
-        val region = snapshot.completedRegion ?: snapshot.activeRegionEstimate
-
-        return MotionSample(
-            timestamp = slotTimestamp,
-            stepDelta3s = normalizedStepDelta,
-            stepRate3s = stepRate3s,
-            kStatus = snapshot.stK.status.name,
-            kRawStatus = snapshot.stK.rawStatus.name,
-            kAvg = snapshot.stK.avg,
-            kScalarAvg = snapshot.stK.scalarAvg,
-            kDirectionalityRatio = snapshot.stK.directionalityRatio,
-            kVariance = snapshot.stK.variance,
-            kMaxMagnitude = snapshot.stK.maxMagnitude,
-            kConfidence = snapshot.stK.confidence,
-            kAccelSource = snapshot.stK.source.name,
-            trKStatus = trK.status.name,
-            trKRawStatus = trK.rawStatus.name,
-            trKAvg = trK.avg,
-            trKScalarAvg = trK.scalarAvg,
-            trKDirectionalityRatio = trK.directionalityRatio,
-            trKMaxMagnitude = trK.maxMagnitude,
-            trKHorizontalMaxMagnitude = trK.horizontalMaxMagnitude,
-            trKConfidence = trK.confidence,
-            trKAccelSource = trK.source.name,
-            wStatus = snapshot.wStatus.status.name,
-            stepDeltaWindow = snapshot.wStatus.stepDeltaWindow,
-            gpsIntervalMs = snapshot.gpsSampling.intervalMs,
-            gpsImmediate = snapshot.gpsSampling.immediate,
-            confirmedMode = if (snapshot.finalModeConfirmed) snapshot.finalMode.name else null,
-            constantRegionKind = region?.kind?.name,
-            constantRegionSpeedKmh = region?.averageSpeedKmh,
-            constantRegionStartLat = region?.startPoint?.latitude,
-            constantRegionStartLon = region?.startPoint?.longitude,
-            constantRegionEndLat = region?.endPoint?.latitude,
-            constantRegionEndLon = region?.endPoint?.longitude,
-            constantRegionStayLat = region?.stayPoint?.latitude,
-            constantRegionStayLon = region?.stayPoint?.longitude,
-            constantRegionDirectionDeg = region?.directionDeg
         )
     }
 
@@ -887,13 +806,8 @@ class LoggingService : Service(), SensorEventListener {
             },
             constantRegionKind = region.kind.name,
             constantRegionSpeedKmh = region.averageSpeedKmh,
-            constantRegionStartLat = region.startPoint?.latitude,
-            constantRegionStartLon = region.startPoint?.longitude,
-            constantRegionEndLat = region.endPoint?.latitude,
-            constantRegionEndLon = region.endPoint?.longitude,
             constantRegionStayLat = region.stayPoint?.latitude,
-            constantRegionStayLon = region.stayPoint?.longitude,
-            constantRegionDirectionDeg = region.directionDeg
+            constantRegionStayLon = region.stayPoint?.longitude
         )
         db.motionSampleDao().insertReplace(regionStartSample)
         ExportUtil.enqueueMotionSampleToLocalCsv(this, regionStartSample)
@@ -909,13 +823,8 @@ class LoggingService : Service(), SensorEventListener {
                 confirmedMode = finalizedModeFor(sample, region).name,
                 constantRegionKind = region.kind.name,
                 constantRegionSpeedKmh = region.averageSpeedKmh,
-                constantRegionStartLat = region.startPoint?.latitude,
-                constantRegionStartLon = region.startPoint?.longitude,
-                constantRegionEndLat = region.endPoint?.latitude,
-                constantRegionEndLon = region.endPoint?.longitude,
                 constantRegionStayLat = region.stayPoint?.latitude,
-                constantRegionStayLon = region.stayPoint?.longitude,
-                constantRegionDirectionDeg = region.directionDeg
+                constantRegionStayLon = region.stayPoint?.longitude
             )
         }
 
@@ -975,7 +884,7 @@ class LoggingService : Service(), SensorEventListener {
     private fun finalizedModeFor(sample: MotionSample, region: ConstantRegionResult): Mode =
         when (region.kind) {
             ConstantRegionKind.CONSTANT_MOVE -> Mode.VEHICLE
-            ConstantRegionKind.STAY -> if (StKStatus.fromStored(sample.kStatus) == StKStatus.STK1) {
+            ConstantRegionKind.STAY -> if (StKStatus.fromStored(sample.stKStatus) == StKStatus.STK1) {
                 Mode.DEVICE_STILL
             } else {
                 Mode.STOPPED

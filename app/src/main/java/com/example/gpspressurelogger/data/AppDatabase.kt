@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [LogEntry::class, MotionSample::class],
-    version = 11,
+    version = 12,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -161,6 +161,40 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v11 → v12: motion_samples のスキーマを「画面再現必要十分」セットに整理する。
+         * 診断フィールド (kAvg, kVariance, trKAvg ...) は表示で読まれていないため削除し、
+         * `kStatus` は意味を明確にするため `stKStatus` にリネームする。
+         * 過去の motion_samples データは破棄する（log_entries は維持）。
+         * 解析用の生センサーデータは別ファイル（`raw_*.csv.gz`）に切り出した。
+         */
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS motion_samples")
+                db.execSQL(
+                    """
+                    CREATE TABLE motion_samples (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        stKStatus TEXT,
+                        trKStatus TEXT,
+                        wStatus TEXT,
+                        stepDeltaWindow INTEGER,
+                        gpsImmediate INTEGER,
+                        confirmedMode TEXT,
+                        constantRegionKind TEXT,
+                        constantRegionSpeedKmh REAL,
+                        constantRegionStayLat REAL,
+                        constantRegionStayLon REAL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_motion_samples_timestamp ON motion_samples(timestamp)"
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -178,7 +212,8 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_7_8,
                     MIGRATION_8_9,
                     MIGRATION_9_10,
-                    MIGRATION_10_11
+                    MIGRATION_10_11,
+                    MIGRATION_11_12
                 )
                 .build().also { INSTANCE = it }
             }

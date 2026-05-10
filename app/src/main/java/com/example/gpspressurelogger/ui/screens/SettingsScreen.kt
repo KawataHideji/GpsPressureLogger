@@ -50,12 +50,10 @@ fun SettingsScreen(
     val mapWidgetIntervalMin     by viewModel.mapWidgetIntervalMin.collectAsState()
     val widgetTransparency       by viewModel.widgetTransparency.collectAsState()
     val importFileUri            by viewModel.importFileUri.collectAsState()
-    val motionImportFileUri      by viewModel.motionImportFileUri.collectAsState()
     val debugLogFileUri          by viewModel.debugLogFileUri.collectAsState()
     val driveDebugEnabled        by viewModel.driveDebugEnabled.collectAsState()
     val verboseDebugLogEnabled   by viewModel.verboseDebugLogEnabled.collectAsState()
     var showImportDialog by remember { mutableStateOf(false) }
-    var showMotionImportDialog by remember { mutableStateOf(false) }
 
     // 衝突解決ダイアログ
     if (showImportDialog) {
@@ -82,30 +80,6 @@ fun SettingsScreen(
         )
     }
 
-    if (showMotionImportDialog) {
-        AlertDialog(
-            onDismissRequest = { showMotionImportDialog = false },
-            title = { Text("補助ログ import 設定") },
-            text = { Text("既存の補助センサー判定ログと時間が重複する場合の処理を選択してください。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.triggerMotionImport(overwrite = true)
-                    showMotionImportDialog = false
-                }) {
-                    Text("上書きする")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    viewModel.triggerMotionImport(overwrite = false)
-                    showMotionImportDialog = false
-                }) {
-                    Text("既存を優先")
-                }
-            }
-        )
-    }
-
     val importFilePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -126,30 +100,12 @@ fun SettingsScreen(
         }
     }
 
-    val motionImportFilePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let {
-            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-            context.contentResolver.takePersistableUriPermission(it, flags)
-            viewModel.setMotionImportFileUri(it.toString())
-        }
-    }
-
     // ファイル保存ランチャー (エクスポート用：汎用インテント方式)
     val fileSaveLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri -> viewModel.exportToUri(uri) }
-        }
-    }
-
-    val motionFileSaveLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            result.data?.data?.let { uri -> viewModel.exportMotionSamplesToUri(uri) }
         }
     }
 
@@ -229,15 +185,14 @@ fun SettingsScreen(
             
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 
-                // エクスポート：Intent を生で構成し、全てのストレージを表示
+                // 標準データのエクスポート：統一18カラム CSV を 1 ファイルで出す。
                 Button(
-                    onClick = { 
+                    onClick = {
                         val timeStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.JAPAN).format(Date())
                         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                             addCategory(Intent.CATEGORY_OPENABLE)
                             type = "text/csv"
-                            putExtra(Intent.EXTRA_TITLE, "gps_pressure_full_backup_$timeStr.csv")
-                            // SDカードなどの高度なデバイスを強制表示
+                            putExtra(Intent.EXTRA_TITLE, "gps_pressure_standard_$timeStr.csv")
                             putExtra("android.content.extra.SHOW_ADVANCED", true)
                             putExtra(Intent.EXTRA_LOCAL_ONLY, false)
                         }
@@ -246,31 +201,13 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                 ) {
-                    Text("全ログを保存 (Googleドライブ/SDカード等)")
-                }
-
-                Button(
-                    onClick = {
-                        val timeStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.JAPAN).format(Date())
-                        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                            addCategory(Intent.CATEGORY_OPENABLE)
-                            type = "text/csv"
-                            putExtra(Intent.EXTRA_TITLE, "gps_pressure_motion_events_backup_$timeStr.csv")
-                            putExtra("android.content.extra.SHOW_ADVANCED", true)
-                            putExtra(Intent.EXTRA_LOCAL_ONLY, false)
-                        }
-                        motionFileSaveLauncher.launch(intent)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                ) {
-                    Text("状態イベントログを保存")
+                    Text("標準データを保存 (Googleドライブ/SDカード等)")
                 }
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                // インポート
-                Text("標準バックアップ CSV の取り込み・復元", style = MaterialTheme.typography.labelMedium)
+                // インポート（標準CSV：Type 1 / Type 2 のどちらも統一パーサーで読み込む）
+                Text("標準データ CSV の取り込み・復元", style = MaterialTheme.typography.labelMedium)
                 Button(
                     onClick = { importFilePickerLauncher.launch(arrayOf("text/csv", "text/comma-separated-values")) },
                     modifier = Modifier.fillMaxWidth()
@@ -285,26 +222,6 @@ fun SettingsScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
                     ) {
                         Text("選択した CSV からデータを統合・復元")
-                    }
-                }
-
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                Text("補助センサー判定ログ CSV の取り込み・復元", style = MaterialTheme.typography.labelMedium)
-                Button(
-                    onClick = { motionImportFilePickerLauncher.launch(arrayOf("text/csv", "text/comma-separated-values")) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("補助ログ CSV ファイルを選択")
-                }
-
-                if (motionImportFileUri != null) {
-                    Button(
-                        onClick = { showMotionImportDialog = true },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
-                    ) {
-                        Text("選択した補助ログ CSV を統合・復元")
                     }
                 }
 

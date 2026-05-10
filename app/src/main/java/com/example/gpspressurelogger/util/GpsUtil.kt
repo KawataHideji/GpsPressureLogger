@@ -162,10 +162,6 @@ object GpsUtil {
         val stepsDelta: Int,
         val displayMode: MovementDetector.Mode,
         val constantRegionKind: ConstantRegionKind? = null,
-        val constantRegionStartLat: Double? = null,
-        val constantRegionStartLon: Double? = null,
-        val constantRegionEndLat: Double? = null,
-        val constantRegionEndLon: Double? = null,
         val constantRegionStayLat: Double? = null,
         val constantRegionStayLon: Double? = null,
         val returnBurstFixed: Boolean = false,
@@ -176,10 +172,6 @@ object GpsUtil {
         val timestamp: Long,
         val confirmedMode: MovementDetector.Mode,
         val constantRegionKind: ConstantRegionKind?,
-        val constantRegionStartLat: Double? = null,
-        val constantRegionStartLon: Double? = null,
-        val constantRegionEndLat: Double? = null,
-        val constantRegionEndLon: Double? = null,
         val constantRegionStayLat: Double?,
         val constantRegionStayLon: Double?
     )
@@ -1503,10 +1495,6 @@ object GpsUtil {
         val modeMap = modeStates.associateBy({ it.timestamp }, { it.confirmedMode })
         var lastMode = MovementDetector.Mode.UNKNOWN
         var lastConstantRegionKind: ConstantRegionKind? = null
-        var lastConstantRegionStartLat: Double? = null
-        var lastConstantRegionStartLon: Double? = null
-        var lastConstantRegionEndLat: Double? = null
-        var lastConstantRegionEndLon: Double? = null
         var lastConstantRegionStayLat: Double? = null
         var lastConstantRegionStayLon: Double? = null
         var modeIndex = 0
@@ -1518,10 +1506,6 @@ object GpsUtil {
             while (modeIndex < sortedStates.size && sortedStates[modeIndex].timestamp <= entry.timestamp) {
                 lastMode = sortedStates[modeIndex].confirmedMode
                 lastConstantRegionKind = sortedStates[modeIndex].constantRegionKind
-                lastConstantRegionStartLat = sortedStates[modeIndex].constantRegionStartLat
-                lastConstantRegionStartLon = sortedStates[modeIndex].constantRegionStartLon
-                lastConstantRegionEndLat = sortedStates[modeIndex].constantRegionEndLat
-                lastConstantRegionEndLon = sortedStates[modeIndex].constantRegionEndLon
                 lastConstantRegionStayLat = sortedStates[modeIndex].constantRegionStayLat
                 lastConstantRegionStayLon = sortedStates[modeIndex].constantRegionStayLon
                 modeIndex += 1
@@ -1534,10 +1518,6 @@ object GpsUtil {
                 stepsDelta = entry.stepsDelta ?: 0,
                 displayMode = modeMap[entry.timestamp] ?: lastMode,
                 constantRegionKind = lastConstantRegionKind,
-                constantRegionStartLat = lastConstantRegionStartLat,
-                constantRegionStartLon = lastConstantRegionStartLon,
-                constantRegionEndLat = lastConstantRegionEndLat,
-                constantRegionEndLon = lastConstantRegionEndLon,
                 constantRegionStayLat = lastConstantRegionStayLat,
                 constantRegionStayLon = lastConstantRegionStayLon
             )
@@ -1550,15 +1530,9 @@ object GpsUtil {
         entries: List<LogEntry> = emptyList()
     ): List<ModeState> {
         if (samples.isEmpty()) return emptyList()
-        val usesMotionStateColumns = samples.any {
-            it.confirmedMode != null ||
-                it.kStatus != null ||
-                it.wStatus != null ||
-                it.constantRegionKind != null
-        }
-        if (usesMotionStateColumns) return inferModeStatesFromConfirmedCache(samples, entries)
-
-        return inferLegacyModeStates(samples)
+        // 旧形式（accelStddev3s 等で legacy mode 推定）の MotionSample は廃止された。
+        // 新形式の MotionSample から確定 mode (confirmedMode) と provisional mode を組み立てる。
+        return inferModeStatesFromConfirmedCache(samples, entries)
     }
 
     private fun inferModeStatesFromConfirmedCache(
@@ -1604,72 +1578,6 @@ object GpsUtil {
                     constantRegionKind = constantRegionKind
                 )
             }
-        }
-
-        return result
-    }
-
-    private fun inferLegacyModeStates(samples: List<MotionSample>): List<ModeState> {
-        val history = ArrayDeque<Int>()
-        var currentMode = MovementDetector.Mode.UNKNOWN
-        var pendingMode = MovementDetector.Mode.UNKNOWN
-        var pendingCount = 0
-        val result = mutableListOf<ModeState>()
-
-        samples.forEach { sample ->
-            val constantRegionKind = parseConstantRegionKind(sample.constantRegionKind)
-            val stepDelta3s = sample.stepDelta3s?.coerceAtLeast(0)
-            history.addLast(stepDelta3s ?: 0)
-            while (history.size > MODE_STEP_SMOOTH_WINDOW_COUNT) history.removeFirst()
-
-            val stepDelta9s = history.sum()
-            val stepRate9s = stepDelta9s / (LoggingConfig.SLOT_INTERVAL_SECONDS * MODE_STEP_SMOOTH_WINDOW_COUNT)
-
-            val stddev = sample.accelStddev3s
-            val mad = sample.accelMad3s
-            val candidateResult = MovementDetector.computeModeCandidate(
-                currentMode = currentMode,
-                stddev = stddev,
-                mad = mad,
-                stepDelta9s = stepDelta9s,
-                stepRate9s = stepRate9s
-            )
-            val candidateMode = candidateResult.candidateMode
-
-            currentMode = when {
-                candidateMode == MovementDetector.Mode.UNKNOWN -> currentMode
-                candidateMode == currentMode -> {
-                    pendingMode = MovementDetector.Mode.UNKNOWN
-                    pendingCount = 0
-                    currentMode
-                }
-                candidateResult.immediate -> {
-                    pendingMode = MovementDetector.Mode.UNKNOWN
-                    pendingCount = 0
-                    candidateMode
-                }
-                else -> {
-                    if (candidateMode != pendingMode) {
-                        pendingMode = candidateMode
-                        pendingCount = 1
-                    } else {
-                        pendingCount += 1
-                    }
-                    if (pendingCount >= MovementDetector.requiredWindowsForMode(candidateMode)) {
-                        pendingMode = MovementDetector.Mode.UNKNOWN
-                        pendingCount = 0
-                        candidateMode
-                    } else {
-                        currentMode
-                    }
-                }
-            }
-
-            result += modeStateFromSample(
-                sample = sample,
-                mode = currentMode,
-                constantRegionKind = constantRegionKind
-            )
         }
 
         return result
@@ -1757,7 +1665,7 @@ object GpsUtil {
         constantRegionKind: ConstantRegionKind?,
         allowOpenRegionFallback: Boolean
     ): MovementDetector.Mode? {
-        val stK = StKStatus.fromStored(sample.kStatus)
+        val stK = StKStatus.fromStored(sample.stKStatus)
         val wStatus = sample.wStatus
         return when {
             stK == StKStatus.STK4 -> MovementDetector.Mode.VEHICLE
@@ -1782,10 +1690,6 @@ object GpsUtil {
             timestamp = sample.timestamp,
             confirmedMode = mode,
             constantRegionKind = constantRegionKind,
-            constantRegionStartLat = sample.constantRegionStartLat,
-            constantRegionStartLon = sample.constantRegionStartLon,
-            constantRegionEndLat = sample.constantRegionEndLat,
-            constantRegionEndLon = sample.constantRegionEndLon,
             constantRegionStayLat = sample.constantRegionStayLat,
             constantRegionStayLon = sample.constantRegionStayLon
         )
@@ -2235,7 +2139,7 @@ object GpsUtil {
         var prevRegion: ConstantRegionKind? = null
 
         for (sample in sorted) {
-            val stK = StKStatus.fromStored(sample.kStatus)
+            val stK = StKStatus.fromStored(sample.stKStatus)
             val region = parseConstantRegionKind(sample.constantRegionKind)
 
             val stKChanged = stK != null && stK != prevStK
@@ -2284,7 +2188,7 @@ object GpsUtil {
 
         for (sample in sorted) {
             val trK = parseTrKStatus(sample.trKStatus)
-            val stK = StKStatus.fromStored(sample.kStatus)
+            val stK = StKStatus.fromStored(sample.stKStatus)
             val trK4Changed = trK != null && trK != prevTrK && trK == TrKStatus.TRK4
             val gpsImmediate = sample.gpsImmediate == true
             if ((trK4Changed || gpsImmediate) && stK != StKStatus.STK4) {
