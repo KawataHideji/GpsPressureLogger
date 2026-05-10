@@ -31,6 +31,7 @@ import com.example.gpspressurelogger.sensor.StaticMotionStateParamsProvider
 import com.example.gpspressurelogger.sensor.TrKStatus
 import com.example.gpspressurelogger.sensor.TrKTransitionSnapshot
 import com.example.gpspressurelogger.util.ExportUtil
+import com.example.gpspressurelogger.util.RawSensorWriter
 import com.example.gpspressurelogger.util.GpsUtil
 import com.example.gpspressurelogger.util.LoggingConfig
 import com.example.gpspressurelogger.util.PressureUtil
@@ -93,6 +94,15 @@ class LoggingService : Service(), SensorEventListener {
     // DataStore 毎回読み込みを避けるためにキャッシュ（Flow collector で更新）
     @Volatile private var cachedPressureWidgetIntervalMin: Int = SettingsRepository.DEFAULT_PRESSURE_WIDGET_INTERVAL_MIN
     @Volatile private var cachedMapWidgetIntervalMin: Int = SettingsRepository.DEFAULT_MAP_WIDGET_INTERVAL_MIN
+    // 解析データ（生センサーログ）の保持 ON/OFF。RawSensorWriter の入口で参照する。
+    // sensor thread から毎イベント読まれるため @Volatile キャッシュにする。
+    @Volatile private var cachedAnalysisDataEnabled: Boolean = false
+    private val rawSensorWriter: RawSensorWriter by lazy {
+        RawSensorWriter(
+            baseDir = ExportUtil.getAnalysisDir(this),
+            enabledFlag = { cachedAnalysisDataEnabled }
+        )
+    }
 
     private val motionDispatcher = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "MotionStateManager")
@@ -199,6 +209,15 @@ class LoggingService : Service(), SensorEventListener {
                 currentMapWidgetIntervalMs = -1L // 次スロットで再スケジュール
             }
         }
+        serviceScope.launch {
+            settings.analysisDataEnabled.collect { enabled ->
+                cachedAnalysisDataEnabled = enabled
+                ExportUtil.writeDebugLog(
+                    this@LoggingService,
+                    "ANALYSIS_DATA_ENABLED_CHANGED: enabled=$enabled"
+                )
+            }
+        }
 
         registerAllSensors()
         createNotificationChannel()
@@ -245,6 +264,8 @@ class LoggingService : Service(), SensorEventListener {
             flushPendingMotionCsvRewrites("service_destroy")
         }
         ExportUtil.flushPendingCsvQueues(this)
+        // 解析データの gzip writer を閉じる。閉じないと内部 buffer の残りがディスクに出ない。
+        rawSensorWriter.closeAll()
         super.onDestroy()
         sensorManager.unregisterListener(this)
         fusedLocationClient.removeLocationUpdates(locationCallback)
@@ -280,49 +301,52 @@ class LoggingService : Service(), SensorEventListener {
         // AccelManager 内部が `synchronized(this)` でスレッドセーフなので、Android の sensor
         // スレッドから直接呼び出して取りこぼしゼロ・遅延ゼロにする。
         // 歩数系・GPS は元のまま motionScope.launch 経由（数秒に1回〜数Hzの低頻度なのでジョブ蓄積を起こさない）。
+        // 解析データ ON のときは RawSensorWriter にも生の値をそのまま流す。
+        // RawSensorWriter は内部で synchronized + 設定 OFF なら即 return なので hot path 影響は最小。
+        val nowMs = System.currentTimeMillis()
         when (event.sensor.type) {
-            Sensor.TYPE_PRESSURE -> lastPressure = event.values[0]
+            Sensor.TYPE_PRESSURE -> {
+                val p = event.values[0]
+                lastPressure = p
+                rawSensorWriter.appendPressure(nowMs, p)
+            }
             Sensor.TYPE_LINEAR_ACCELERATION -> {
-                motionStateManager.addLinearAccelerationSample(
-                    event.values[0],
-                    event.values[1],
-                    event.values[2],
-                    System.currentTimeMillis()
-                )
+                val x = event.values[0]; val y = event.values[1]; val z = event.values[2]
+                motionStateManager.addLinearAccelerationSample(x, y, z, nowMs)
+                rawSensorWriter.appendLinearAccel(nowMs, "LINEAR", x, y, z)
             }
             Sensor.TYPE_ROTATION_VECTOR -> {
-                motionStateManager.updateRotationVector(event.values.copyOf())
+                val values = event.values.copyOf()
+                motionStateManager.updateRotationVector(values)
+                rawSensorWriter.appendRotation(nowMs, values)
             }
             Sensor.TYPE_MAGNETIC_FIELD -> {
-                motionStateManager.updateMagneticField(
-                    event.values[0],
-                    event.values[1],
-                    event.values[2]
-                )
+                val x = event.values[0]; val y = event.values[1]; val z = event.values[2]
+                motionStateManager.updateMagneticField(x, y, z)
+                rawSensorWriter.appendMagnetic(nowMs, x, y, z)
             }
             Sensor.TYPE_ACCELEROMETER -> {
-                val ax = event.values[0]
-                val ay = event.values[1]
-                val az = event.values[2]
+                val ax = event.values[0]; val ay = event.values[1]; val az = event.values[2]
                 if (rotationVectorSensor == null) {
                     motionStateManager.updateOrientationAcceleration(ax, ay, az)
                 }
                 if (linearAccelerationSensor == null) {
                     val motionNorm = abs(sqrt(ax * ax + ay * ay + az * az) - GRAVITY_MPS2)
-                    motionStateManager.addAccelerationNormSample(motionNorm, System.currentTimeMillis())
+                    motionStateManager.addAccelerationNormSample(motionNorm, nowMs)
                 }
+                rawSensorWriter.appendLinearAccel(nowMs, "RAW", ax, ay, az)
             }
             Sensor.TYPE_STEP_COUNTER -> {
                 val currentTotal = event.values[0].toInt()
-                val timestampMs = System.currentTimeMillis()
+                rawSensorWriter.appendStepCounter(nowMs, currentTotal)
                 motionScope.launch {
-                    motionStateManager.addStepCounterTotal(currentTotal, timestampMs)
+                    motionStateManager.addStepCounterTotal(currentTotal, nowMs)
                 }
             }
             Sensor.TYPE_STEP_DETECTOR -> {
-                val timestampMs = System.currentTimeMillis()
+                rawSensorWriter.appendStepDetector(nowMs)
                 motionScope.launch {
-                    motionStateManager.addStepDetectorEvent(timestampMs)
+                    motionStateManager.addStepDetectorEvent(nowMs)
                 }
             }
         }
@@ -902,6 +926,20 @@ class LoggingService : Service(), SensorEventListener {
         if (latitude == 0.0 && longitude == 0.0) return
         val altitude = getLatestAltitude(location)
         val timestampMs = location.time.takeIf { it > 0L } ?: System.currentTimeMillis()
+        // 解析データ ON のとき、生 GPS fix（aggregate 前）を per-fix で保存する。
+        // ここは GPS の callback スレッドで、頻度は最大 ~10Hz なので RawSensorWriter の
+        // synchronized 直書きで問題ない。
+        rawSensorWriter.appendGps(
+            ts = timestampMs,
+            lat = latitude,
+            lon = longitude,
+            alt = altitude,
+            accuracy = accuracy,
+            provider = location.provider,
+            bearing = if (location.hasBearing()) location.bearing else null,
+            speed = if (location.hasSpeed()) location.speed else null,
+            source = if (burstGpsCallback != null) "BURST" else "NORMAL"
+        )
         synchronized(gpsPool) {
             gpsPool.addLast(
                 GpsSample(

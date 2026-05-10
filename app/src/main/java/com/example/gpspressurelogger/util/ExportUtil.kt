@@ -46,6 +46,7 @@ object ExportUtil {
     private const val LOGS_DIR = "logs"
     private const val METRICS_DIR = "metrics"
     private const val DEBUG_DIR = "debug"
+    private const val ANALYSIS_DIR = "analysis"
     private const val BATCH_SIZE = 1000
 
     /**
@@ -311,6 +312,12 @@ object ExportUtil {
 
     private fun buildDebugLogFile(context: Context): File =
         File(getStorageDir(context, DEBUG_DIR), DEBUG_LOG_FILE_NAME)
+
+    /**
+     * 解析用データ（生センサーログ）のローカル保存ディレクトリ。
+     * `RawSensorWriter` が `raw_*.csv.gz` を直近2日分だけ保持する。
+     */
+    fun getAnalysisDir(context: Context): File = getStorageDir(context, ANALYSIS_DIR)
 
     fun enqueueEntryToLocalCsv(context: Context, entry: LogEntry) {
         synchronized(csvQueueLock) {

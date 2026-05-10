@@ -35,6 +35,8 @@ class SettingsRepository(private val context: Context) {
         val KEY_DRIVE_DEBUG_ENABLED = booleanPreferencesKey("drive_debug_enabled")
         /** 詳細デバッグログ */
         val KEY_VERBOSE_DEBUG_LOG_ENABLED = booleanPreferencesKey("verbose_debug_log_enabled")
+        /** 解析用データ（生センサー値）の保持 ON/OFF */
+        val KEY_ANALYSIS_DATA_ENABLED = booleanPreferencesKey("analysis_data_enabled")
         /** 起動時歩数修復の実行済みバージョン */
         val KEY_STEP_REPAIR_VERSION = intPreferencesKey("step_repair_version")
 
@@ -76,6 +78,9 @@ class SettingsRepository(private val context: Context) {
 
     val verboseDebugLogEnabled: Flow<Boolean> = context.dataStore.data
         .map { it[KEY_VERBOSE_DEBUG_LOG_ENABLED] ?: false }
+
+    val analysisDataEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_ANALYSIS_DATA_ENABLED] ?: false }
 
     val stepRepairVersion: Flow<Int> = context.dataStore.data
         .map { it[KEY_STEP_REPAIR_VERSION] ?: 0 }
@@ -120,6 +125,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setVerboseDebugLogEnabled(value: Boolean) {
         context.dataStore.edit { it[KEY_VERBOSE_DEBUG_LOG_ENABLED] = value }
+    }
+
+    suspend fun setAnalysisDataEnabled(value: Boolean) {
+        context.dataStore.edit { it[KEY_ANALYSIS_DATA_ENABLED] = value }
     }
 
     suspend fun setStepRepairVersion(value: Int) {
