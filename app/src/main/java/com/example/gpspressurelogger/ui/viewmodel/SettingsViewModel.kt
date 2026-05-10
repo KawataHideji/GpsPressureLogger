@@ -45,6 +45,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val verboseDebugLogEnabled: StateFlow<Boolean> = settings.verboseDebugLogEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
+    val analysisDataEnabled: StateFlow<Boolean> = settings.analysisDataEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
     fun setLookbackMin(value: Int) = viewModelScope.launch {
         settings.setLookbackMin(value)
         com.example.gpspressurelogger.widget.PressureWidgetReceiver.forceUpdateAll(getApplication())
@@ -79,6 +82,23 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setVerboseDebugLogEnabled(value: Boolean) = viewModelScope.launch {
         settings.setVerboseDebugLogEnabled(value)
         ExportUtil.writeDebugLog(getApplication(), "VERBOSE_DEBUG_CHANGED: enabled=$value")
+    }
+
+    fun setAnalysisDataEnabled(value: Boolean) = viewModelScope.launch {
+        settings.setAnalysisDataEnabled(value)
+        ExportUtil.writeDebugLog(getApplication(), "ANALYSIS_DATA_CHANGED: enabled=$value")
+    }
+
+    fun exportAnalysisDataToUri(fileUri: Uri) = viewModelScope.launch {
+        Toast.makeText(getApplication(), "解析データのエクスポートを開始します...", Toast.LENGTH_SHORT).show()
+        val success = withContext(Dispatchers.IO) {
+            ExportUtil.exportAnalysisDataToZip(getApplication(), fileUri)
+        }
+        if (success) {
+            Toast.makeText(getApplication(), "解析データのエクスポートが完了しました", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(getApplication(), "解析データが無いか、エクスポートに失敗しました", Toast.LENGTH_LONG).show()
+        }
     }
 
     fun syncDebugLogNow() = viewModelScope.launch {

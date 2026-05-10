@@ -17,6 +17,8 @@ import java.io.*
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.zip.GZIPInputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /**
  * 高度なデータ統合ユーティリティ (v9: 最終・完全解析版)
@@ -318,6 +320,91 @@ object ExportUtil {
      * `RawSensorWriter` が `raw_*.csv.gz` を直近2日分だけ保持する。
      */
     fun getAnalysisDir(context: Context): File = getStorageDir(context, ANALYSIS_DIR)
+
+    /**
+     * 解析データを 1 ファイルの ZIP にまとめてユーザー指定 Uri へ書き出す。
+     *
+     * - `raw_*.csv.gz` を 1 つずつ読み出して内部の生 CSV を取り出し、ZIP の deflate
+     *   エントリとして格納する。受け取り側は普通の ZIP として解凍するだけで
+     *   `raw_*.csv` が出てくる（ユーザーは gzip → csv の二重解凍をしなくて済む）。
+     * - 直近2日分の全ファイルをまとめる（`RawSensorWriter` 側で既に古いファイルは削除済み）。
+     */
+    fun exportAnalysisDataToZip(context: Context, fileUri: Uri): Boolean {
+        return try {
+            val files = analysisExportableFiles(context)
+            if (files.isEmpty()) {
+                writeLocalDebugLog(context, "EXPORT_ANALYSIS_EMPTY uri=$fileUri reason=noFiles")
+                deleteUriQuietly(context, fileUri)
+                return false
+            }
+            val outputStream = context.contentResolver.openOutputStream(fileUri)
+            if (outputStream == null) {
+                writeLocalDebugLog(
+                    context,
+                    "EXPORT_ANALYSIS_FAILED uri=$fileUri reason=openOutputStreamReturnedNull files=${files.size}"
+                )
+                deleteUriQuietly(context, fileUri)
+                return false
+            }
+            outputStream.use { out ->
+                ZipOutputStream(BufferedOutputStream(out)).use { zip ->
+                    val buffer = ByteArray(8 * 1024)
+                    files.forEach { file ->
+                        val entryName = file.name.removeSuffix(".gz")
+                        val entry = ZipEntry(entryName).apply { time = file.lastModified() }
+                        zip.putNextEntry(entry)
+                        runCatching {
+                            FileInputStream(file).use { fis ->
+                                GZIPInputStream(fis).use { gz ->
+                                    while (true) {
+                                        val read = gz.read(buffer)
+                                        if (read <= 0) break
+                                        zip.write(buffer, 0, read)
+                                    }
+                                }
+                            }
+                        }.onFailure { throwable ->
+                            writeLocalDebugLog(
+                                context,
+                                "EXPORT_ANALYSIS_ENTRY_FAILED file=${file.name} reason=${throwable.javaClass.simpleName}:${throwable.message ?: "unknown"}"
+                            )
+                        }
+                        zip.closeEntry()
+                    }
+                }
+            }
+            val exportedSize = exportedDocumentSize(context, fileUri)
+            if (exportedSize <= 0L) {
+                writeLocalDebugLog(
+                    context,
+                    "EXPORT_ANALYSIS_FAILED uri=$fileUri reason=emptyDocument files=${files.size}"
+                )
+                deleteUriQuietly(context, fileUri)
+                return false
+            }
+            writeLocalDebugLog(
+                context,
+                "EXPORT_ANALYSIS_OK uri=$fileUri files=${files.size} size=$exportedSize"
+            )
+            true
+        } catch (e: Throwable) {
+            writeLocalDebugLog(
+                context,
+                "EXPORT_ANALYSIS_FAILED uri=$fileUri reason=${e.javaClass.simpleName}:${e.message ?: "unknown"}"
+            )
+            deleteUriQuietly(context, fileUri)
+            false
+        }
+    }
+
+    private fun analysisExportableFiles(context: Context): List<File> {
+        val dir = getAnalysisDir(context)
+        if (!dir.isDirectory) return emptyList()
+        return (dir.listFiles() ?: emptyArray()).asSequence()
+            .filter { it.isFile && it.name.endsWith(".csv.gz") && it.name.startsWith("raw_") }
+            .sortedBy { it.name }
+            .toList()
+    }
 
     fun enqueueEntryToLocalCsv(context: Context, entry: LogEntry) {
         synchronized(csvQueueLock) {

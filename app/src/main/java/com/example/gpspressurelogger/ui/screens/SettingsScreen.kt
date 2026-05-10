@@ -53,6 +53,7 @@ fun SettingsScreen(
     val debugLogFileUri          by viewModel.debugLogFileUri.collectAsState()
     val driveDebugEnabled        by viewModel.driveDebugEnabled.collectAsState()
     val verboseDebugLogEnabled   by viewModel.verboseDebugLogEnabled.collectAsState()
+    val analysisDataEnabled      by viewModel.analysisDataEnabled.collectAsState()
     var showImportDialog by remember { mutableStateOf(false) }
 
     // 衝突解決ダイアログ
@@ -106,6 +107,14 @@ fun SettingsScreen(
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri -> viewModel.exportToUri(uri) }
+        }
+    }
+
+    val analysisExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.data?.let { uri -> viewModel.exportAnalysisDataToUri(uri) }
         }
     }
 
@@ -202,6 +211,41 @@ fun SettingsScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                 ) {
                     Text("標準データを保存 (Googleドライブ/SDカード等)")
+                }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                // 解析データ（生センサーログ）。チェック ON で記録、ボタンで直近2日分を ZIP 出力。
+                Text("解析データ（生センサー値・直近2日分）", style = MaterialTheme.typography.labelMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("解析データを保持する")
+                    Switch(
+                        checked = analysisDataEnabled,
+                        onCheckedChange = { viewModel.setAnalysisDataEnabled(it) }
+                    )
+                }
+                if (analysisDataEnabled) {
+                    Button(
+                        onClick = {
+                            val timeStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.JAPAN).format(Date())
+                            val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                                addCategory(Intent.CATEGORY_OPENABLE)
+                                type = "application/zip"
+                                putExtra(Intent.EXTRA_TITLE, "gps_pressure_analysis_$timeStr.zip")
+                                putExtra("android.content.extra.SHOW_ADVANCED", true)
+                                putExtra(Intent.EXTRA_LOCAL_ONLY, false)
+                            }
+                            analysisExportLauncher.launch(intent)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text("解析データを ZIP で保存（直近2日）")
+                    }
                 }
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))

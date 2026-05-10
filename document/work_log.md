@@ -1,6 +1,18 @@
 # 作業リスト
 
-最終更新: 2026-05-06
+最終更新: 2026-05-10
+
+## 2026-05-10
+
+- データ記録とファイル出力の全面再設計を実施した
+- 標準データを統一 18 カラム CSV 1 形式に集約。アプリのエクスポートは Type 1（完全データ）として全カラムを使い、外部入力は Type 2（気圧のみ・GPS のみ・歩数のみ・任意組み合わせ）の部分集合 CSV を許容する。インポートは行ごとに `log_entries` / `motion_samples` へ振り分け、衝突行は「既存を優先」モードで欠落フィールドだけ埋めるマージ動作にする
+- `motion_samples` テーブルを 14 列削減して画面再現に必要な 11 列まで圧縮し、`kStatus` は意味を明確にするため `stKStatus` にリネームした。Room v11→v12 マイグレーションで motion_samples のみ DROP & 再作成、`log_entries` は維持する
+- 解析データ（生センサー値）保持のチェックボックスを設定に追加。ON のとき `analysis/raw_*.csv.gz` に加速度・回転・磁気・歩数・GPS・気圧を per-sensor の gzip CSV として書き出す。論理日（3 時 - 翌 3 時）単位でファイルを切り替え、書き込み時に「2 日以上前」のファイルを自動削除して直近 2 日分だけを保持する
+- 設定画面に「解析データを ZIP で保存（直近2日）」ボタンを追加。ZIP 内には gzip 解凍済みの `raw_*.csv` が入るので、受け取り側は ZIP 解凍するだけで個別 CSV が手に入る
+- センサー hot path 影響を抑えるため、`RawSensorWriter` は per-sensor の synchronized + 設定 OFF 時の早期 return + 200 件ごとの flush で構成し、`motionScope.launch` を使わない
+- 旧形式（補助センサー判定ログ、状態イベントログ）の import / export ボタンと SettingsViewModel の対応関数群、SettingsRepository の `motionImportFileUri` キーを削除
+- 旧 `inferLegacyModeStates` / `LoggingConfig.MotionLogRoutine` enum / 6 種類のレガシーヘッダー定数を削除
+- 仕様ドキュメント `data_spec.md` / `room_data_spec.md` を最新スキーマに更新
 
 ## 2026-04-10
 

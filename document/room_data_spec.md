@@ -1,6 +1,8 @@
 # Room 内部データ仕様書
 
-最終更新: 2026-05-06
+最終更新: 2026-05-10
+
+> 注: 2026-05-10 の v11→v12 マイグレーションで `motion_samples` テーブルのスキーマを大幅に削減した。本仕様書のうち削減済みフィールド（kAvg, kVariance, trKAvg, kRawStatus, accelStddev3s 等）に関する記述は最新コードを正とする。新スキーマは末尾「v12 motion_samples スキーマ」を参照。
 
 ## 1. 目的
 
@@ -412,3 +414,31 @@ CSV の空欄は Room では `null` として扱う。
 - 旧 version 4 DB からの移行時は新テーブルを作成してデータコピーする
 - 旧 `stepCount` は新仕様の `stepsDelta` と意味が異なるため、自動変換せず `null` とする
 - 位置・高度・気圧は旧 DB からそのまま引き継ぐ
+- v11 → v12: `motion_samples` テーブルを破棄して新スキーマ（11 列）で再作成する。`log_entries` は維持する。診断用フィールドは表示で読まれていなかったため削除し、生センサーデータが必要なら新設の `analysis/raw_*.csv.gz` を使う
+
+## v12 motion_samples スキーマ
+
+新方式の `motion_samples` テーブルは「画面再現に必要十分」な 11 フィールドのみを持つ:
+
+| カラム | 型 | 用途 |
+|--------|-----|------|
+| `id` | INTEGER (PK, autoinc) | 内部 ID |
+| `timestamp` | INTEGER (UNIQUE) | 状態変化イベント時刻 |
+| `stKStatus` | TEXT? | stK 状態 (STK1/STK2/STK4)。AC ラベル / provisional mode に必要。旧 `kStatus` を rename |
+| `trKStatus` | TEXT? | trK 状態 (TRK1/TRK4)。tON ラベルに必要 |
+| `wStatus` | TEXT? | 歩行判定 (W1/W2)。provisional mode に必要 |
+| `stepDeltaWindow` | INTEGER? | 直近 W 窓内の歩数差分。provisional VEHICLE 判定に必要 |
+| `gpsImmediate` | INTEGER? | trK4 遷移で GPS 即時取得を要求した行 (BOOL)。tON ラベル trigger |
+| `confirmedMode` | TEXT? | DEVICE_STILL/STOPPED/WALKING/VEHICLE。地図色分けの確定キー |
+| `constantRegionKind` | TEXT? | STAY/CONSTANT_MOVE/NONE。STAY/CMOV ラベル |
+| `constantRegionSpeedKmh` | REAL? | provisional 速度（GPS 欠落時の VEHICLE fallback） |
+| `constantRegionStayLat` | REAL? | STAY 中心点 lat（停止マーカー位置） |
+| `constantRegionStayLon` | REAL? | STAY 中心点 lon（同上） |
+
+削除した旧フィールド（解析・診断用）は `analysis/raw_*.csv.gz` で確保すること:
+
+- `accelStddev3s`, `accelMad3s`, `stepDelta3s`, `stepRate3s` — 旧 legacy mode 推定の入力。新方式は使わない
+- `kRawStatus`, `kAvg`, `kScalarAvg`, `kDirectionalityRatio`, `kVariance`, `kMaxMagnitude`, `kConfidence`, `kAccelSource` — stK 内部診断値。新方式は表示で読まれていない
+- `trKRawStatus`, `trKAvg`, `trKScalarAvg`, `trKDirectionalityRatio`, `trKMaxMagnitude`, `trKHorizontalMaxMagnitude`, `trKConfidence`, `trKAccelSource` — trK 内部診断値。同上
+- `gpsIntervalMs` — GPS 制御の決定値。表示には不要
+- `constantRegionStartLat/Lon`, `constantRegionEndLat/Lon`, `constantRegionDirectionDeg` — 領域幾何。`buildDisplayPoints` を経由して `ModeState` に運ばれていたが、最終描画では使われていない
