@@ -195,12 +195,18 @@ fun SettingsScreen(
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 
                 // 標準データのエクスポート：統一18カラム CSV を 1 ファイルで出す。
+                //
+                // MIME を text/csv にすると Google Drive 側が CSV → Google Sheets 変換を
+                // 試み、100 MB を超えるファイルでサイレントに失敗する（cloud 上のサイズが 0）
+                // という挙動が観測された。Drive 上での自動処理を避けるため
+                // application/octet-stream で渡し、拡張子のみ .csv にして PC 側で
+                // 普通の CSV として扱えるようにする。
                 Button(
                     onClick = {
                         val timeStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.JAPAN).format(Date())
                         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                             addCategory(Intent.CATEGORY_OPENABLE)
-                            type = "text/csv"
+                            type = "application/octet-stream"
                             putExtra(Intent.EXTRA_TITLE, "gps_pressure_standard_$timeStr.csv")
                             putExtra("android.content.extra.SHOW_ADVANCED", true)
                             putExtra(Intent.EXTRA_LOCAL_ONLY, false)
