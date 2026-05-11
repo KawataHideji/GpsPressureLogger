@@ -18,6 +18,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.zip.GZIPInputStream
 import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 /**
@@ -635,6 +636,17 @@ object ExportUtil {
      * log_entries と motion_samples を timestamp で時系列マージし、それぞれ専用の
      * カラムだけが埋まった行として連続出力する。日次 EVENT コメントも保持する。
      */
+    /**
+     * 標準バックアップを ZIP（1 エントリの CSV）として書き出す。
+     *
+     * 経緯: 直接 .csv を SAF で Google Drive に書き込むと、ファイルサイズが 100 MB
+     * 程度を超えた瞬間に Drive 側が cloud 上で 0 バイトとして扱う挙動が観測された
+     * （MIME を application/octet-stream にしても改善せず）。Drive は ZIP ファイルは
+     * 元々問題なく扱う（解析データ ZIP は通っている）ので、CSV を 1 つだけ含む
+     * ZIP として包んで送る。
+     *
+     * 受け取り側（PC、viewer）は unzip して中の .csv を取り出してから読み込む。
+     */
     suspend fun writeStandardBackupToUri(context: Context, fileUri: Uri, db: AppDatabase): Boolean {
         val tStart = System.currentTimeMillis()
         return try {
@@ -657,11 +669,16 @@ object ExportUtil {
             var entryRows = 0
             var motionRows = 0
             var commentRows = 0
+            val entryName = "gps_pressure_standard_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.JAPAN).format(Date())}.csv"
             outputStream.use { out ->
-                BufferedWriter(OutputStreamWriter(out)).use { writer ->
+                ZipOutputStream(BufferedOutputStream(out)).use { zip ->
+                    zip.putNextEntry(ZipEntry(entryName))
+                    // BufferedWriter を ZipOutputStream の上に重ねる。
+                    // writer.close() すると zip まで閉じてしまうので明示 close せず、flush だけ呼ぶ。
+                    val writer = BufferedWriter(OutputStreamWriter(zip, Charsets.UTF_8))
                     writeCsvComment(writer, "GpsPressureLogger standard backup")
                     writer.write("$STANDARD_CSV_HEADER\n")
-                    writer.flush()  // ヘッダーは早期に flush して、後段が長くても 0 バイトに見えないようにする
+                    writer.flush()
                     writeLocalDebugLog(
                         context,
                         "EXPORT_STANDARD_HEADER_WRITTEN elapsedMs=${System.currentTimeMillis() - tStart}"
@@ -675,8 +692,7 @@ object ExportUtil {
 
                     // log_entries を timestamp 昇順で 1 ページずつ書き出す。
                     // EVENT コメントは log_entries の時刻に合わせて挟み込む。
-                    // motion_samples は別ファイル感覚で末尾にまとめて追記する。
-                    // viewer 側は CSV を timestamp ソートして取り込むので、出力順序は厳密でなくて良い。
+                    // motion_samples は末尾にまとめて追記する（viewer 側で timestamp ソートする）。
                     val entryPager = pageEntries(db)
                     var commentIndex = 0
                     while (true) {
@@ -717,6 +733,8 @@ object ExportUtil {
                         if (motionRows % BATCH_SIZE == 0) writer.flush()
                     }
                     writer.flush()
+                    // ZipOutputStream.use 終了で entry/zip ともに close され、ZIP の中央ディレクトリが書かれる
+                    zip.closeEntry()
                     writeLocalDebugLog(
                         context,
                         "EXPORT_STANDARD_MOTION_DONE motion=$motionRows elapsedMs=${System.currentTimeMillis() - tStart}"
@@ -735,7 +753,7 @@ object ExportUtil {
             }
             writeLocalDebugLog(
                 context,
-                "EXPORT_STANDARD_OK uri=$fileUri entries=$entryRows motion=$motionRows comments=$commentRows size=$exportedSize totalElapsedMs=${System.currentTimeMillis() - tStart}"
+                "EXPORT_STANDARD_OK uri=$fileUri entryName=$entryName entries=$entryRows motion=$motionRows comments=$commentRows zipSize=$exportedSize totalElapsedMs=${System.currentTimeMillis() - tStart}"
             )
             true
         } catch (e: Throwable) {
@@ -849,15 +867,33 @@ object ExportUtil {
             val db = AppDatabase.getInstance(context)
             val doc = DocumentFile.fromSingleUri(context, fileUri)
             val name = doc?.name ?: "selected.csv"
-            if (!name.endsWith(".csv", ignoreCase = true)) {
+            val isCsv = name.endsWith(".csv", ignoreCase = true)
+            val isZip = name.endsWith(".zip", ignoreCase = true)
+            if (!isCsv && !isZip) {
                 return ImportReport(
                     importedCount = 0,
                     processedFiles = 0,
-                    skippedFiles = listOf(ImportIssue(name, message = "CSV ではないためスキップ")),
+                    skippedFiles = listOf(ImportIssue(name, message = "CSV / ZIP ではないためスキップ")),
                     parseErrors = emptyList()
                 )
             }
-            val importResult = streamImportUnifiedCsv(context, db, fileUri, name, overwrite) { c ->
+            // ZIP（標準バックアップ）の場合は中の最初の .csv エントリを取り出して
+            // 一時ファイル化したうえで通常の CSV パーサーに流す。
+            val csvUriToImport = if (isZip) {
+                val tempCsv = extractFirstCsvFromZip(context, fileUri)
+                if (tempCsv == null) {
+                    return ImportReport(
+                        importedCount = 0,
+                        processedFiles = 0,
+                        skippedFiles = listOf(ImportIssue(name, message = "ZIP に CSV エントリが見つかりません")),
+                        parseErrors = emptyList()
+                    )
+                }
+                Uri.fromFile(tempCsv)
+            } else {
+                fileUri
+            }
+            val importResult = streamImportUnifiedCsv(context, db, csvUriToImport, name, overwrite) { c ->
                 onProgress(name, c)
             }
             if (importResult.importedCount > 0) {
@@ -872,6 +908,40 @@ object ExportUtil {
                 skippedFiles = listOf(ImportIssue("(file)", message = "ファイル読込エラー: ${e.message}")),
                 parseErrors = emptyList()
             )
+        }
+    }
+
+    /**
+     * ZIP の中身を走査し、最初に見つかった `.csv` エントリの内容を一時ファイルへ展開して返す。
+     * 見つからなければ null。
+     */
+    private fun extractFirstCsvFromZip(context: Context, zipUri: Uri): File? {
+        return try {
+            context.contentResolver.openInputStream(zipUri)?.use { input ->
+                ZipInputStream(BufferedInputStream(input)).use { zis ->
+                    while (true) {
+                        val entry = zis.nextEntry ?: break
+                        if (!entry.isDirectory && entry.name.endsWith(".csv", ignoreCase = true)) {
+                            val tempFile = File.createTempFile("imported_", ".csv", context.cacheDir)
+                            tempFile.deleteOnExit()
+                            FileOutputStream(tempFile).use { fos ->
+                                val buffer = ByteArray(8 * 1024)
+                                while (true) {
+                                    val read = zis.read(buffer)
+                                    if (read <= 0) break
+                                    fos.write(buffer, 0, read)
+                                }
+                            }
+                            return tempFile
+                        }
+                        zis.closeEntry()
+                    }
+                }
+            }
+            null
+        } catch (e: Throwable) {
+            writeLocalDebugLog(context, "IMPORT_ZIP_EXTRACT_FAILED reason=${e.javaClass.simpleName}:${e.message ?: "unknown"}")
+            null
         }
     }
 

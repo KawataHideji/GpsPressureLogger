@@ -194,20 +194,20 @@ fun SettingsScreen(
             
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 
-                // 標準データのエクスポート：統一18カラム CSV を 1 ファイルで出す。
+                // 標準データのエクスポート：統一18カラム CSV を ZIP に包んで 1 ファイルで出す。
                 //
-                // MIME を text/csv にすると Google Drive 側が CSV → Google Sheets 変換を
-                // 試み、100 MB を超えるファイルでサイレントに失敗する（cloud 上のサイズが 0）
-                // という挙動が観測された。Drive 上での自動処理を避けるため
-                // application/octet-stream で渡し、拡張子のみ .csv にして PC 側で
-                // 普通の CSV として扱えるようにする。
+                // 経緯: SAF 経由で .csv (text/csv または application/octet-stream) を
+                // Google Drive に書き込むと、100 MB 程度を超えたところで Drive 側が
+                // cloud 上で 0 バイトとして扱う事象を確認した。ZIP コンテナで包めば
+                // Drive は中身に触らず素直に保存するため、CSV 1 ファイルだけを含む
+                // ZIP として出力する。PC 側は unzip して .csv を取り出す。
                 Button(
                     onClick = {
                         val timeStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.JAPAN).format(Date())
                         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                             addCategory(Intent.CATEGORY_OPENABLE)
-                            type = "application/octet-stream"
-                            putExtra(Intent.EXTRA_TITLE, "gps_pressure_standard_$timeStr.csv")
+                            type = "application/zip"
+                            putExtra(Intent.EXTRA_TITLE, "gps_pressure_standard_$timeStr.zip")
                             putExtra("android.content.extra.SHOW_ADVANCED", true)
                             putExtra(Intent.EXTRA_LOCAL_ONLY, false)
                         }
@@ -216,7 +216,7 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                 ) {
-                    Text("標準データを保存 (Googleドライブ/SDカード等)")
+                    Text("標準データを保存 (ZIP: Googleドライブ/SDカード等)")
                 }
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -259,7 +259,7 @@ fun SettingsScreen(
                 // インポート（標準CSV：Type 1 / Type 2 のどちらも統一パーサーで読み込む）
                 Text("標準データ CSV の取り込み・復元", style = MaterialTheme.typography.labelMedium)
                 Button(
-                    onClick = { importFilePickerLauncher.launch(arrayOf("text/csv", "text/comma-separated-values")) },
+                    onClick = { importFilePickerLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "application/zip")) },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("読込元の CSV ファイルを選択")
@@ -271,7 +271,7 @@ fun SettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
                     ) {
-                        Text("選択した CSV からデータを統合・復元")
+                        Text("選択した CSV / ZIP からデータを統合・復元")
                     }
                 }
 
