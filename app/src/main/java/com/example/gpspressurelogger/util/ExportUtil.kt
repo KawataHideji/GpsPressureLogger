@@ -331,6 +331,10 @@ object ExportUtil {
      */
     fun exportAnalysisDataToZip(context: Context, fileUri: Uri): Boolean {
         return try {
+            // RawSensorWriter が書き込み中の gzip ストリームを閉じて trailer を確定させる。
+            // 閉じないと GZIPInputStream が "Unexpected end of ZLIB input stream" で失敗する。
+            // 次に sensor サンプルが来たら writer は自動再オープンするので記録は途切れない。
+            RawSensorWriter.sealForExport()
             val files = analysisExportableFiles(context)
             if (files.isEmpty()) {
                 writeLocalDebugLog(context, "EXPORT_ANALYSIS_EMPTY uri=$fileUri reason=noFiles")
@@ -632,8 +636,10 @@ object ExportUtil {
      * カラムだけが埋まった行として連続出力する。日次 EVENT コメントも保持する。
      */
     suspend fun writeStandardBackupToUri(context: Context, fileUri: Uri, db: AppDatabase): Boolean {
+        val tStart = System.currentTimeMillis()
         return try {
             flushPendingCsvQueues(context)
+            writeLocalDebugLog(context, "EXPORT_STANDARD_FLUSHED queues elapsedMs=${System.currentTimeMillis() - tStart}")
             val outputStream = context.contentResolver.openOutputStream(fileUri)
             if (outputStream == null) {
                 writeLocalDebugLog(
@@ -643,46 +649,78 @@ object ExportUtil {
                 deleteUriQuietly(context, fileUri)
                 return false
             }
+            writeLocalDebugLog(
+                context,
+                "EXPORT_STANDARD_STREAM_OPENED uri=$fileUri elapsedMs=${System.currentTimeMillis() - tStart}"
+            )
 
             var entryRows = 0
             var motionRows = 0
+            var commentRows = 0
             outputStream.use { out ->
                 BufferedWriter(OutputStreamWriter(out)).use { writer ->
                     writeCsvComment(writer, "GpsPressureLogger standard backup")
                     writer.write("$STANDARD_CSV_HEADER\n")
-                    val comments = collectDailyCsvEventComments(context)
+                    writer.flush()  // ヘッダーは早期に flush して、後段が長くても 0 バイトに見えないようにする
+                    writeLocalDebugLog(
+                        context,
+                        "EXPORT_STANDARD_HEADER_WRITTEN elapsedMs=${System.currentTimeMillis() - tStart}"
+                    )
 
-                    // log_entries / motion_samples / EVENT コメントをそれぞれソート済みストリームとして
-                    // 取り出し、3 つを timestamp の昇順でマージしながら 1 行ずつ書き出す。
+                    val comments = collectDailyCsvEventComments(context)
+                    writeLocalDebugLog(
+                        context,
+                        "EXPORT_STANDARD_COMMENTS_LOADED count=${comments.size} elapsedMs=${System.currentTimeMillis() - tStart}"
+                    )
+
+                    // log_entries を timestamp 昇順で 1 ページずつ書き出す。
+                    // EVENT コメントは log_entries の時刻に合わせて挟み込む。
+                    // motion_samples は別ファイル感覚で末尾にまとめて追記する。
+                    // viewer 側は CSV を timestamp ソートして取り込むので、出力順序は厳密でなくて良い。
                     val entryPager = pageEntries(db)
-                    val motionPager = pageMotionSamples(db)
                     var commentIndex = 0
-                    var nextEntry = entryPager.next()
-                    var nextMotion = motionPager.next()
-                    while (nextEntry != null || nextMotion != null || commentIndex < comments.size) {
-                        val ce = nextEntry?.timestamp ?: Long.MAX_VALUE
-                        val cm = nextMotion?.timestamp ?: Long.MAX_VALUE
-                        val cc = if (commentIndex < comments.size) comments[commentIndex].timestamp else Long.MAX_VALUE
-                        val minTs = minOf(ce, cm, cc)
-                        when (minTs) {
-                            cc -> {
-                                writer.write(comments[commentIndex].line + "\n")
-                                commentIndex += 1
-                            }
-                            ce -> {
-                                writer.write(unifiedRowFromEntry(nextEntry!!) + "\n")
-                                entryRows += 1
-                                nextEntry = entryPager.next()
-                            }
-                            else -> {
-                                writer.write(unifiedRowFromMotion(nextMotion!!) + "\n")
-                                motionRows += 1
-                                nextMotion = motionPager.next()
-                            }
+                    while (true) {
+                        val entry = entryPager.next() ?: break
+                        while (commentIndex < comments.size && comments[commentIndex].timestamp <= entry.timestamp) {
+                            writer.write(comments[commentIndex].line + "\n")
+                            commentIndex += 1
+                            commentRows += 1
                         }
-                        if ((entryRows + motionRows) % BATCH_SIZE == 0) writer.flush()
+                        writer.write(unifiedRowFromEntry(entry) + "\n")
+                        entryRows += 1
+                        if (entryRows % BATCH_SIZE == 0) {
+                            writer.flush()
+                            writeLocalDebugLog(
+                                context,
+                                "EXPORT_STANDARD_PROGRESS entries=$entryRows elapsedMs=${System.currentTimeMillis() - tStart}"
+                            )
+                        }
+                    }
+                    // 残りのコメント
+                    while (commentIndex < comments.size) {
+                        writer.write(comments[commentIndex].line + "\n")
+                        commentIndex += 1
+                        commentRows += 1
                     }
                     writer.flush()
+                    writeLocalDebugLog(
+                        context,
+                        "EXPORT_STANDARD_ENTRIES_DONE entries=$entryRows comments=$commentRows elapsedMs=${System.currentTimeMillis() - tStart}"
+                    )
+
+                    // motion_samples を末尾に追記
+                    val motionPager = pageMotionSamples(db)
+                    while (true) {
+                        val sample = motionPager.next() ?: break
+                        writer.write(unifiedRowFromMotion(sample) + "\n")
+                        motionRows += 1
+                        if (motionRows % BATCH_SIZE == 0) writer.flush()
+                    }
+                    writer.flush()
+                    writeLocalDebugLog(
+                        context,
+                        "EXPORT_STANDARD_MOTION_DONE motion=$motionRows elapsedMs=${System.currentTimeMillis() - tStart}"
+                    )
                 }
             }
 
@@ -697,13 +735,13 @@ object ExportUtil {
             }
             writeLocalDebugLog(
                 context,
-                "EXPORT_STANDARD_OK uri=$fileUri entries=$entryRows motion=$motionRows size=$exportedSize"
+                "EXPORT_STANDARD_OK uri=$fileUri entries=$entryRows motion=$motionRows comments=$commentRows size=$exportedSize totalElapsedMs=${System.currentTimeMillis() - tStart}"
             )
             true
         } catch (e: Throwable) {
             writeLocalDebugLog(
                 context,
-                "EXPORT_STANDARD_FAILED uri=$fileUri reason=${e.javaClass.simpleName}:${e.message ?: "unknown"}"
+                "EXPORT_STANDARD_FAILED uri=$fileUri reason=${e.javaClass.simpleName}:${e.message ?: "unknown"} elapsedMs=${System.currentTimeMillis() - tStart}"
             )
             deleteUriQuietly(context, fileUri)
             false

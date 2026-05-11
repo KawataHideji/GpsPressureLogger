@@ -101,7 +101,7 @@ class LoggingService : Service(), SensorEventListener {
         RawSensorWriter(
             baseDir = ExportUtil.getAnalysisDir(this),
             enabledFlag = { cachedAnalysisDataEnabled }
-        )
+        ).also { RawSensorWriter.setActiveInstance(it) }
     }
 
     private val motionDispatcher = Executors.newSingleThreadExecutor { runnable ->
@@ -266,6 +266,7 @@ class LoggingService : Service(), SensorEventListener {
         ExportUtil.flushPendingCsvQueues(this)
         // 解析データの gzip writer を閉じる。閉じないと内部 buffer の残りがディスクに出ない。
         rawSensorWriter.closeAll()
+        RawSensorWriter.setActiveInstance(null)
         super.onDestroy()
         sensorManager.unregisterListener(this)
         fusedLocationClient.removeLocationUpdates(locationCallback)

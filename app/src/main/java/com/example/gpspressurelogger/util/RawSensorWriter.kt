@@ -246,6 +246,24 @@ class RawSensorWriter(
         /** 何件書き込むごとに flush するか。クラッシュ時の損失上限を決める。 */
         private const val BATCH_FLUSH_THRESHOLD = 200
 
+        // ExportUtil から close を呼ぶための弱い参照。LoggingService が onCreate で
+        // setActiveInstance し、onDestroy で setActiveInstance(null) する。
+        // close 後に sensor 経路が次のサンプルを受けると writer が自動再オープンする。
+        @Volatile private var activeInstance: RawSensorWriter? = null
+
+        fun setActiveInstance(writer: RawSensorWriter?) {
+            activeInstance = writer
+        }
+
+        /**
+         * 解析データ ZIP エクスポート直前に呼ぶ。書き込み中の gzip ストリームを
+         * 全てクローズして trailer を書き出し、`GZIPInputStream` が正常に読めるようにする。
+         * 次回 sensor サンプルが来たときに各 writer は自動的に再オープンする。
+         */
+        fun sealForExport() {
+            activeInstance?.closeAll()
+        }
+
         private fun csvFloat(value: Float?): String = value?.toString() ?: ""
         private fun csvDouble(value: Double?): String = value?.toString() ?: ""
         private fun csvString(value: String?): String =
