@@ -223,8 +223,33 @@ def timestamp_to_jst_date_key(timestamp_ms: int) -> str:
 
 
 def load_backup(csv_path: Path):
+    """統一CSV（または旧 full_backup CSV）を読み、LogEntry 系の行・EVENT コメント・
+    MotionSample 系の行を分けて返す。
+
+    新フォーマット (gps_pressure_standard_*.csv) は LogEntry 列と MotionSample 列が
+    同じ 18 カラムヘッダー内に並んでおり、行ごとにどちらか片方だけが埋まっている。
+    旧フォーマット (gps_pressure_full_backup_*.csv) は LogEntry 列だけしか無いので、
+    MotionSample 系の検出はそのまま空リストになり、後段の resolve_motion_csv_path
+    の別ファイル経路にフォールバックする。
+    """
     events = []
     rows = []
+    motion_samples = []
+
+    # MotionSample 系の列名（新フォーマットの右側10カラム）。
+    # 大文字小文字を無視して索引する。
+    motion_column_aliases = {
+        "stKStatus": ["StKStatus", "KStatus"],
+        "trKStatus": ["TrKStatus"],
+        "wStatus": ["WStatus"],
+        "stepDeltaWindow": ["StepDeltaWindow"],
+        "gpsImmediate": ["GpsImmediate"],
+        "confirmedMode": ["ConfirmedMode"],
+        "constantRegionKind": ["ConstantRegionKind"],
+        "constantRegionSpeedKmh": ["ConstantRegionSpeedKmh"],
+        "constantRegionStayLat": ["ConstantRegionStayLat"],
+        "constantRegionStayLon": ["ConstantRegionStayLon"],
+    }
 
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
         header = None
@@ -255,35 +280,94 @@ def load_backup(csv_path: Path):
             timestamp_ms = parse_timestamp_value(timestamp_text)
             if timestamp_ms is None:
                 continue
-            row = {
-                "Timestamp": timestamp_ms,
-                "dt": timestamp_to_jst_text(timestamp_ms),
-                "Lat": to_float(get_header_value(values, index_by_name, ["Lat", "Latitude"])),
-                "Lon": to_float(get_header_value(values, index_by_name, ["Lon", "Longitude"])),
-                "Alt": to_float(get_header_value(values, index_by_name, ["Alt", "Elevation(m)"])),
-                "PresRaw": to_float(get_header_value(values, index_by_name, ["PresRaw", "Pa"])),
-                "PresQnh": to_float(get_header_value(values, index_by_name, ["PresQnh", "MSLP(Pa)"])),
-                "GpsAccuracy": to_float(get_header_value(values, index_by_name, ["GpsAccuracy", "Accuracy", "Accuracy(m)"])),
-                "StepsDelta": 0,
-            }
-            if row["PresRaw"] is not None and row["PresRaw"] > 2000:
-                row["PresRaw"] = row["PresRaw"] / 100.0
-            if row["PresQnh"] is not None and row["PresQnh"] > 2000:
-                row["PresQnh"] = row["PresQnh"] / 100.0
+
+            # まず LogEntry 系の生値を集める。新フォーマットの motion 行ではこれらが
+            # 全部空になるので、後で「LogEntry 行として登録するか」を判定する。
+            lat = to_float(get_header_value(values, index_by_name, ["Lat", "Latitude"]))
+            lon = to_float(get_header_value(values, index_by_name, ["Lon", "Longitude"]))
+            alt = to_float(get_header_value(values, index_by_name, ["Alt", "Elevation(m)"]))
+            pres_raw = to_float(get_header_value(values, index_by_name, ["PresRaw", "Pa"]))
+            pres_qnh = to_float(get_header_value(values, index_by_name, ["PresQnh", "MSLP(Pa)"]))
+            gps_acc = to_float(get_header_value(values, index_by_name, ["GpsAccuracy", "Accuracy", "Accuracy(m)"]))
             steps_delta_text = get_header_value(values, index_by_name, ["StepsDelta"])
-            if steps_delta_text != "":
-                row["StepsDelta"] = to_int(steps_delta_text) or 0
-            else:
-                raw_steps = to_int(get_header_value(values, index_by_name, ["Steps"]))
-                row["_RawSteps"] = raw_steps
-            row["GpsValid"] = (
-                row["Lat"] is not None
-                and row["Lon"] is not None
-                and not (row["Lat"] == 0 and row["Lon"] == 0)
-            )
-            rows.append(row)
+            raw_steps_text = get_header_value(values, index_by_name, ["Steps"])
+            has_log_entry = any(v is not None for v in (lat, lon, alt, pres_raw, pres_qnh, gps_acc)) \
+                or steps_delta_text != "" \
+                or raw_steps_text != ""
+
+            if has_log_entry:
+                row = {
+                    "Timestamp": timestamp_ms,
+                    "dt": timestamp_to_jst_text(timestamp_ms),
+                    "Lat": lat,
+                    "Lon": lon,
+                    "Alt": alt,
+                    "PresRaw": pres_raw,
+                    "PresQnh": pres_qnh,
+                    "GpsAccuracy": gps_acc,
+                    "StepsDelta": 0,
+                }
+                if row["PresRaw"] is not None and row["PresRaw"] > 2000:
+                    row["PresRaw"] = row["PresRaw"] / 100.0
+                if row["PresQnh"] is not None and row["PresQnh"] > 2000:
+                    row["PresQnh"] = row["PresQnh"] / 100.0
+                if steps_delta_text != "":
+                    row["StepsDelta"] = to_int(steps_delta_text) or 0
+                else:
+                    row["_RawSteps"] = to_int(raw_steps_text)
+                row["GpsValid"] = (
+                    row["Lat"] is not None
+                    and row["Lon"] is not None
+                    and not (row["Lat"] == 0 and row["Lon"] == 0)
+                )
+                rows.append(row)
+
+            # 続いて MotionSample 系を抽出する。LogEntry 行と motion 行が同じ
+            # timestamp で並んでいることもある（新フォーマットでは行が分かれる）。
+            confirmed = normalize_mode(get_header_value(values, index_by_name, ["ConfirmedMode"]))
+            stK_status = get_header_value(values, index_by_name, motion_column_aliases["stKStatus"]) or None
+            trK_status = get_header_value(values, index_by_name, motion_column_aliases["trKStatus"]) or None
+            w_status = get_header_value(values, index_by_name, motion_column_aliases["wStatus"]) or None
+            region_kind = get_header_value(values, index_by_name, motion_column_aliases["constantRegionKind"]) or None
+            region_speed = to_float(get_header_value(values, index_by_name, motion_column_aliases["constantRegionSpeedKmh"]))
+            stay_lat = to_float(get_header_value(values, index_by_name, motion_column_aliases["constantRegionStayLat"]))
+            stay_lon = to_float(get_header_value(values, index_by_name, motion_column_aliases["constantRegionStayLon"]))
+            step_delta_window = to_int(get_header_value(values, index_by_name, motion_column_aliases["stepDeltaWindow"]))
+            gps_immediate = get_header_bool(values, index_by_name, motion_column_aliases["gpsImmediate"])
+
+            has_motion = any(v is not None for v in (
+                confirmed, stK_status, trK_status, w_status, region_kind,
+                region_speed, stay_lat, stay_lon, step_delta_window, gps_immediate,
+            ))
+            if has_motion:
+                motion_samples.append({
+                    "Timestamp": timestamp_ms,
+                    "ConfirmedMode": confirmed,
+                    "KStatus": stK_status,
+                    "StKAvg": None,
+                    "StKRatio": None,
+                    "KAccelSource": None,
+                    "TrKStatus": trK_status,
+                    "TrKRawStatus": None,
+                    "TrKAvg": None,
+                    "TrKRatio": None,
+                    "WStatus": w_status,
+                    "StepDelta3s": None,
+                    "StepDeltaWindow": step_delta_window,
+                    "GpsIntervalMs": None,
+                    "GpsImmediate": gps_immediate,
+                    "ConstantRegionKind": region_kind,
+                    "ConstantRegionSpeedKmh": region_speed,
+                    "ConstantRegionStartLat": None,
+                    "ConstantRegionStartLon": None,
+                    "ConstantRegionEndLat": None,
+                    "ConstantRegionEndLon": None,
+                    "ConstantRegionStayLat": stay_lat,
+                    "ConstantRegionStayLon": stay_lon,
+                })
 
     rows.sort(key=lambda row: row["Timestamp"])
+    motion_samples.sort(key=lambda sample: sample["Timestamp"])
     previous_raw_steps = None
     for row in rows:
         raw_steps = row.pop("_RawSteps", None) if "_RawSteps" in row else None
@@ -295,7 +379,7 @@ def load_backup(csv_path: Path):
             previous_raw_steps = raw_steps
     recompute_steps_cumulative(rows)
 
-    return rows, events
+    return rows, events, motion_samples
 
 
 def clone_rows(rows):
@@ -3600,9 +3684,17 @@ def load_dashboard_sources(csv_path_arg: str | None = None, motion_csv_path_arg:
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV not found: {csv_path}")
 
-    rows, events = load_backup(csv_path)
-    motion_csv_path_resolved = resolve_motion_csv_path(csv_path, motion_csv_path_arg)
-    motion_samples, used_motion_path = load_motion_samples(motion_csv_path_resolved)
+    rows, events, inline_motion_samples = load_backup(csv_path)
+    if inline_motion_samples:
+        # 新フォーマットでは LogEntry と MotionSample が同じ CSV に含まれている
+        # ので別ファイルは見に行かない。
+        motion_samples = inline_motion_samples
+        used_motion_path = csv_path
+    else:
+        # 旧 full_backup CSV にはモーション列が無いので、隣に置かれている
+        # motion_metrics_*.csv / motion_events_*.csv を従来通り探す。
+        motion_csv_path_resolved = resolve_motion_csv_path(csv_path, motion_csv_path_arg)
+        motion_samples, used_motion_path = load_motion_samples(motion_csv_path_resolved)
     rows = assign_display_modes(rows, events, motion_samples)
     return {
         "csv_path": csv_path,
