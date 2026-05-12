@@ -21,6 +21,7 @@ local.properties
 /window_viewer/__pycache__/
 /window_viewer/desktop_app/__pycache__/
 /window_viewer/desktop_cache/
+/window_viewer/.zip_cache/
 /window_viewer/merged_dashboard.html
 /window_viewer/merged_dashboard*.html
 /window_viewer/tmp_old.html
