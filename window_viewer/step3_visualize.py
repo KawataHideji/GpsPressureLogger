@@ -134,17 +134,27 @@ def _maybe_extract_zip(path: Path) -> Path:
     return path
 
 
-def resolve_csv_path(csv_path_arg: str | None) -> Path:
+def resolve_csv_path(csv_path_arg: str | None, prefer_legacy: bool = False) -> Path:
+    """csv_path_arg が指定されていればそれを優先（ZIP の場合は中の CSV を展開）。
+    指定がない場合は DEFAULT_ANDROID_DIR から自動選択する。
+
+    prefer_legacy=True の時は新フォーマット（standard_*.zip/csv）を無視して
+    旧フォーマット（gps_pressure_full_backup_*.csv）の中から mtime 最新を選ぶ。
+    既に蓄積した旧バックアップを参照したい場合のショートカット。
+    """
     if csv_path_arg:
         return _maybe_extract_zip(Path(csv_path_arg))
 
     if DEFAULT_ANDROID_DIR.exists():
-        # 新フォーマット（standard_*.zip / standard_*.csv）と旧フォーマット
-        # （full_backup_*.csv）を全部集めて mtime 最新を選ぶ。
         candidates: list[Path] = []
-        candidates += list(DEFAULT_ANDROID_DIR.glob(STANDARD_BACKUP_GLOB_ZIP))
-        candidates += list(DEFAULT_ANDROID_DIR.glob(STANDARD_BACKUP_GLOB_CSV))
-        candidates += list(DEFAULT_ANDROID_DIR.glob(DEFAULT_BACKUP_GLOB))
+        if prefer_legacy:
+            candidates += list(DEFAULT_ANDROID_DIR.glob(DEFAULT_BACKUP_GLOB))
+        else:
+            # 新フォーマット（standard_*.zip / standard_*.csv）と旧フォーマット
+            # （full_backup_*.csv）を全部集めて mtime 最新を選ぶ。
+            candidates += list(DEFAULT_ANDROID_DIR.glob(STANDARD_BACKUP_GLOB_ZIP))
+            candidates += list(DEFAULT_ANDROID_DIR.glob(STANDARD_BACKUP_GLOB_CSV))
+            candidates += list(DEFAULT_ANDROID_DIR.glob(DEFAULT_BACKUP_GLOB))
         # 0 バイトのファイルは過去の失敗エクスポートなので除外。
         candidates = [p for p in candidates if p.stat().st_size > 0]
         if candidates:
