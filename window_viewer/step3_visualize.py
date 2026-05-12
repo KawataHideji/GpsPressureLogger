@@ -5,6 +5,7 @@ import json
 import os
 import re
 import webbrowser
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from math import acos, asin, cos, degrees, hypot, radians, sin, sqrt
@@ -14,8 +15,15 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 DEFAULT_CSV = "gps_pressure_full_backup_converted.csv"
 DEFAULT_HTML = str(SCRIPT_DIR / "merged_dashboard.html")
+# 新フォーマット（ZIP に CSV を 1 つ含む形式、または直接 .csv）
+STANDARD_BACKUP_GLOB_CSV = "gps_pressure_standard_*.csv"
+STANDARD_BACKUP_GLOB_ZIP = "gps_pressure_standard_*.zip"
+# 旧フォーマット
 DEFAULT_BACKUP_GLOB = "gps_pressure_full_backup_*.csv"
 DEFAULT_CONVERTED_GLOB = "gps_pressure_full_backup_converted*.csv"
+# ZIP の中身を展開しておくキャッシュ。ZIP の mtime をファイル名に含めて
+# 同じソースは再展開しないようにする。
+ZIP_EXTRACT_CACHE_DIR = SCRIPT_DIR / ".zip_cache"
 DEFAULT_ANDROID_DIR = Path(r"C:\MyDrive\android")
 DEFAULT_CONVERTER_DIR = PROJECT_DIR / "log_converter"
 MOTION_BACKUP_PREFIX = "gps_pressure_motion_metrics_backup_"
@@ -81,18 +89,67 @@ def parse_args():
     return parser.parse_args()
 
 
+def _materialize_zip_csv(zip_path: Path) -> Path:
+    """ZIP の中の最初の `.csv` エントリをキャッシュへ展開してそのパスを返す。
+
+    Android アプリの標準データエクスポートは Google Drive 側で大きな CSV を
+    silent drop する事象を避けるため `.zip` で出している。viewer はこの ZIP を
+    透過的に扱えるよう、初回ロード時に SCRIPT_DIR/.zip_cache/ に展開して
+    キャッシュする。ZIP の mtime をキャッシュファイル名に含めるので、同じ
+    ファイルなら 2 回目以降は再展開しない。
+    """
+    ZIP_EXTRACT_CACHE_DIR.mkdir(exist_ok=True)
+    src_mtime_ns = zip_path.stat().st_mtime_ns
+    cache_path = ZIP_EXTRACT_CACHE_DIR / f"{zip_path.stem}__{src_mtime_ns}.csv"
+    if cache_path.exists():
+        return cache_path
+    # 同じ ZIP 由来の古いキャッシュは掃除（mtime が変わったケース）。
+    for old in ZIP_EXTRACT_CACHE_DIR.glob(f"{zip_path.stem}__*.csv"):
+        if old != cache_path:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        csv_name = next(
+            (name for name in zf.namelist() if name.lower().endswith(".csv")),
+            None,
+        )
+        if csv_name is None:
+            raise ValueError(f"{zip_path} に .csv エントリが見つかりません")
+        with zf.open(csv_name) as src, open(cache_path, "wb") as dst:
+            while True:
+                chunk = src.read(64 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+    return cache_path
+
+
+def _maybe_extract_zip(path: Path) -> Path:
+    """与えられた Path が `.zip` なら中身の CSV をキャッシュ展開して返す。
+    `.csv` などはそのまま返す。"""
+    if path.suffix.lower() == ".zip":
+        return _materialize_zip_csv(path)
+    return path
+
+
 def resolve_csv_path(csv_path_arg: str | None) -> Path:
     if csv_path_arg:
-        return Path(csv_path_arg)
+        return _maybe_extract_zip(Path(csv_path_arg))
 
     if DEFAULT_ANDROID_DIR.exists():
-        backups = sorted(
-            DEFAULT_ANDROID_DIR.glob(DEFAULT_BACKUP_GLOB),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-        if backups:
-            return backups[0]
+        # 新フォーマット（standard_*.zip / standard_*.csv）と旧フォーマット
+        # （full_backup_*.csv）を全部集めて mtime 最新を選ぶ。
+        candidates: list[Path] = []
+        candidates += list(DEFAULT_ANDROID_DIR.glob(STANDARD_BACKUP_GLOB_ZIP))
+        candidates += list(DEFAULT_ANDROID_DIR.glob(STANDARD_BACKUP_GLOB_CSV))
+        candidates += list(DEFAULT_ANDROID_DIR.glob(DEFAULT_BACKUP_GLOB))
+        # 0 バイトのファイルは過去の失敗エクスポートなので除外。
+        candidates = [p for p in candidates if p.stat().st_size > 0]
+        if candidates:
+            latest = max(candidates, key=lambda path: path.stat().st_mtime)
+            return _maybe_extract_zip(latest)
 
     local_default = SCRIPT_DIR / DEFAULT_CSV
     if local_default.exists():
