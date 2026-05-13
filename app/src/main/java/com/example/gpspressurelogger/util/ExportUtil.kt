@@ -1178,11 +1178,28 @@ object ExportUtil {
         try {
             val localFile = buildDebugLogFile(context)
             if (!localFile.exists()) return
-            val content = localFile.readText()
+            // 長期運用で debug_log.txt が数百 MB になることがあり、readText() で
+            // 一括ロードすると OOM でクラッシュする。バイト単位でストリームコピーし、
+            // ヒープを増やさず Drive へ流す。
+            val sizeBytes = localFile.length()
+            writeLocalDebugLog(context, "DEBUG_SYNC_START uri=$fileUri size=$sizeBytes")
             context.contentResolver.openOutputStream(fileUri, "wt")?.use { out ->
-                BufferedWriter(OutputStreamWriter(out)).use { it.write(content) }
+                BufferedOutputStream(out).use { buffered ->
+                    FileInputStream(localFile).use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            buffered.write(buffer, 0, read)
+                        }
+                        buffered.flush()
+                    }
+                }
             }
-        } catch (e: Exception) {}
+            writeLocalDebugLog(context, "DEBUG_SYNC_OK uri=$fileUri size=$sizeBytes")
+        } catch (e: Throwable) {
+            writeLocalDebugLog(context, "DEBUG_SYNC_FAILED uri=$fileUri reason=${e.javaClass.simpleName}:${e.message ?: "unknown"}")
+        }
     }
 
     fun writeDebugLog(context: Context, message: String) {
