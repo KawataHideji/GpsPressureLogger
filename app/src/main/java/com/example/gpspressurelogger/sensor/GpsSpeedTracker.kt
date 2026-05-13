@@ -20,21 +20,40 @@ class GpsSpeedTracker(
         trim(point.timestampMs)
     }
 
+    /**
+     * `walkingSpeedWindowMs` 内の点だけを使って速度を返す（厳密版）。
+     * 高速移動中の GPS 欠落で 9 秒窓に 1 点しか無いときは null。
+     */
     fun speedKmh(nowMs: Long): Double? {
         trim(nowMs)
-        if (points.size < 2) return null
+        val windowStart = nowMs - paramsProvider.current().walkingSpeedWindowMs
+        return computeSpeed(points.filter { it.timestampMs >= windowStart })
+    }
 
-        val first = points.first()
-        val last = points.last()
+    /**
+     * `walkingSpeedFallbackWindowMs`（より広い窓）に入っている全点を使って速度を返す。
+     * 厳密窓では 1 点しか取れない場合の VEHICLE 昇格救済用。
+     * 窓が広いぶん精度は粗くなるが、車・電車のような高速・連続移動は十分に拾える。
+     */
+    fun fallbackSpeedKmh(nowMs: Long): Double? {
+        trim(nowMs)
+        return computeSpeed(points.toList())
+    }
+
+    private fun computeSpeed(window: List<MotionGpsPoint>): Double? {
+        if (window.size < 2) return null
+        val first = window.first()
+        val last = window.last()
         val durationMs = last.timestampMs - first.timestampMs
         if (durationMs <= 0L) return null
-
         val distanceM = haversineM(first.latitude, first.longitude, last.latitude, last.longitude)
         return distanceM / (durationMs / 1000.0) * 3.6
     }
 
     private fun trim(nowMs: Long) {
-        val windowStart = nowMs - paramsProvider.current().walkingSpeedWindowMs
+        // 内部バッファは「広い側の窓 (fallback)」分まで保持する。
+        // 厳密版の `speedKmh()` は呼び出し時にさらに `walkingSpeedWindowMs` で絞る。
+        val windowStart = nowMs - paramsProvider.current().walkingSpeedFallbackWindowMs
         while (points.isNotEmpty() && points.first().timestampMs < windowStart) {
             points.removeFirst()
         }

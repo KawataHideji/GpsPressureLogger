@@ -146,6 +146,11 @@ class MotionStateManager(
     private fun createWalkingSpeedSnapshot(timestampMs: Long, wSnapshot: WStatusSnapshot): WalkingSpeedSnapshot {
         val params = paramsProvider.current()
         val gpsSpeed = gpsSpeedTracker.speedKmh(timestampMs)
+        val gpsFallbackSpeed = if (gpsSpeed == null) {
+            gpsSpeedTracker.fallbackSpeedKmh(timestampMs)
+        } else {
+            null
+        }
         val stepSpeed = if (wSnapshot.status == WStatus.W1) {
             val windowSec = params.walkingSpeedWindowMs / 1000.0
             if (windowSec > 0.0) {
@@ -159,7 +164,8 @@ class MotionStateManager(
         return WalkingSpeedSnapshot(
             gpsSpeedKmh = gpsSpeed,
             stepSpeedKmh = stepSpeed,
-            differenceKmh = if (gpsSpeed != null && stepSpeed != null) kotlin.math.abs(gpsSpeed - stepSpeed) else null
+            differenceKmh = if (gpsSpeed != null && stepSpeed != null) kotlin.math.abs(gpsSpeed - stepSpeed) else null,
+            gpsFallbackSpeedKmh = gpsFallbackSpeed
         )
     }
 

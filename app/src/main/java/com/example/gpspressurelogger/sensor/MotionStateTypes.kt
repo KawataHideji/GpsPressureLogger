@@ -112,7 +112,13 @@ data class GpsSamplingDecision(
 data class WalkingSpeedSnapshot(
     val gpsSpeedKmh: Double?,
     val stepSpeedKmh: Double?,
-    val differenceKmh: Double?
+    val differenceKmh: Double?,
+    /**
+     * `walkingSpeedFallbackWindowMs` のより広い窓で計算した GPS 速度。
+     * 厳密窓 (`walkingSpeedWindowMs`) では GPS 点が足りなかったときに使う。
+     * 主に車・電車の高速移動中 GPS 欠落の救済用。
+     */
+    val gpsFallbackSpeedKmh: Double? = null
 )
 
 data class MotionGpsPoint(

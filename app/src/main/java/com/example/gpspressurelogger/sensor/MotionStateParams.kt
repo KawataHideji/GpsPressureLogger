@@ -62,6 +62,13 @@ data class MotionStateParams(
     val gpsStretchStepMs: Long = 5_000L,
     val gpsStretchMaxMs: Long = 30_000L,
     val walkingSpeedWindowMs: Long = 9_000L,
+    /**
+     * W1 のとき、`walkingSpeedWindowMs` 内に GPS 点が揃わなかった場合に
+     * VEHICLE 昇格判定で使う「広めの GPS 速度窓」。
+     * 車内振動を歩数として誤検出した W1 が長時間 WALKING で固定されてしまう
+     * のを防ぐ。30 秒以内のいずれかの GPS ペアから速度を推定する。
+     */
+    val walkingSpeedFallbackWindowMs: Long = 30_000L,
     val walkingVehicleSpeedThresholdKmh: Double = 10.0,
     val walkingStepLengthM: Double = 0.60,
     val walkingGpsStepMismatchThresholdKmh: Double = 5.0,
@@ -100,6 +107,9 @@ data class MotionStateParams(
             "gpsStretchMaxMs must be 0 or >= gpsStableInitialMs"
         }
         require(walkingSpeedWindowMs > 0L) { "walkingSpeedWindowMs must be positive" }
+        require(walkingSpeedFallbackWindowMs >= walkingSpeedWindowMs) {
+            "walkingSpeedFallbackWindowMs must be >= walkingSpeedWindowMs"
+        }
         require(walkingVehicleSpeedThresholdKmh >= 0.0) { "walkingVehicleSpeedThresholdKmh must be non-negative" }
         require(walkingStepLengthM > 0.0) { "walkingStepLengthM must be positive" }
         require(walkingGpsStepMismatchThresholdKmh >= 0.0) {
