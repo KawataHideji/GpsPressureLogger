@@ -22,7 +22,7 @@ object GraphUtil {
     const val COLOR_STEPS = 0xFF3178FF.toInt()
     const val COLOR_MIDNIGHT_LINE = 0x779AA3AE.toInt()
     const val COLOR_MIDNIGHT_LABEL = 0xCCCDD3DC.toInt()
-    const val MAX_ZOOM_OUT_FACTOR = 2
+    const val MAX_ZOOM_OUT_FACTOR = 6
 
     const val PRES_TOP = 0.15f
     const val PRES_BOT = 0.55f

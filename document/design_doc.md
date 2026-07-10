@@ -220,7 +220,7 @@
 - `HomeScreen`
   - グラフのジェスチャを横方向ズーム / 時間移動に制限する。
   - 通常のドラッグで表示窓を古い時刻 / 新しい時刻へ移動し、ピンチインで可視期間を広げる。
-  - 1 本指ドラッグは `draggable`、2 本指ピンチは `transformable` へ役割分担し、競合を避ける。
+  - 単一の `pointerInput` で 1 本指ドラッグと 2 本指以上のピンチを判別し、ピンチ中心の時刻を保持する。
   - グラフ右上の `最新` 操作で、手動移動後の表示を最新ログ追従へ戻す。
   - グラフウィジェットからの起動通知を受けた場合も `HomeViewModel.resetGraphWindowToLatest()` を呼び、前回の手動移動状態や空の表示窓を引き継がない。
   - グラフの描画用 `Path` は表示データ・表示範囲・Canvas サイズが変わった時に再生成し、draw 本体では cached path を描く。
@@ -238,11 +238,13 @@
 - `MapViewModel`
   - 03:00 区切り日単位の地図表示データを `GpsUtil.prepareMapEntries()` で共通前処理して作る。
   - 同日の `MotionSample` を合わせて読み、`GpsUtil.normalizeStopsForDisplay(entries, motionSamples)` を通した表示用系列を `entries` として提供する。
-  - 地図画面は `Flow` による全日分ログのライブ監視を行わず、対象日を選んだ時に `getEntriesBetweenAscOnce()` / `getBetweenOnce()` で one-shot 読み込みする。記録中の 3 秒 insert で地図 overlay を再作成しない。
+  - 過去日は対象日を選んだ時に `getEntriesBetweenAscOnce()` / `getBetweenOnce()` で one-shot 読み込みする。現在の論理日だけ 30 秒周期で再読込し、記録中の 3 秒 insert ごとには地図 overlay を再作成しない。
+  - 軌跡補間、停止クラスタ、モード別線分、GPS 欠損線分を `Dispatchers.Default` 上で `MapRenderData` にまとめ、`MapScreen` の UI スレッドへ完成済み結果を渡す。
   - 前日 / 翌日移動では、位置データが存在する日だけへ遷移する。
 - `MapScreen`
   - 地図 overlay の再描画時に、同一日では自動ズームし直さない。
   - `MapViewModel` が返す表示補正済み系列をそのまま描画に使う。
+  - 進行方向矢印は矢印ごとの `Marker` を作らず、単一の専用 overlay で同じ文字・白縁・角度をまとめて描画する。画面外の矢印は描画しない。
   - 停止区間では `復帰バースト -> 偽クラスタ滞在 -> 偏差列ベース停止補正` を通した表示用 GPS 系列を使う。
   - 折れ線描画では `GpsUtil.buildDisplayPolyline()` を使い、viewer の `GPS 平準化 ON` と同じ考え方の連続折れ線系列を描く。停止マーカーや開始・現在地マーカーは生の位置を維持する。
   - 折れ線幅は `GpsUtil.mapTrackStrokeWidthPx()` で取得し、density を掛けた dp 基準で描く。初回 auto-fit が必要な場合は、地図を fit / zoom してから overlay を追加する。
@@ -464,29 +466,29 @@
 - `GraphUtil.getProcessedSeries()` は「現在時刻基準」ではなく、指定された `windowEndMs` と可視期間に基づいて系列を生成する。
 - 歩数系列は累積離散値として扱い、`GraphUtil.createStepSeries()` はスプライン補間を使わず、各 target time までに到着済みの `StepsDelta` を積み上げた保持値を返す。
 - `HomeScreen` は歩数系列を水平線 + 垂直線の階段状 path として描く。
-- `HomeScreen` は Compose の `draggable` と `transformable` を使って 1 本指ドラッグと 2 本指ピンチを処理する。
+- `HomeScreen` は単一の `pointerInput` で 1 本指ドラッグと 2 本指以上のピンチを処理する。
 - 横ドラッグ量は `GRAPH_DRAG_SENSITIVITY` で倍率調整し、左ドラッグで過去、右ドラッグで未来へ動く向きに統一する。
-- ドラッグ中は UI ローカルの `transientWindowEndMs` を更新し、指を離した時だけ `HomeViewModel.shiftGraphWindowBy()` を呼んで DB 再読込を行う。
-- `HomeViewModel.shiftGraphWindowBy()` には移動量だけでなく現在の可視期間も渡す。DB 保持範囲による下限丸めは設定表示期間ではなく現在の可視期間を使い、ピンチで短い期間に縮めた後も古い時刻へ辿れるようにする。
-- グラフの系列生成と時間範囲ラベルは `transientWindowEndMs` を基準にし、ドラッグ中も表示が追従するようにする。
-- ピンチ時は倍率だけを更新し、系列生成の重い計算は UI スレッドで事前実行しない。
-- ピンチアウトで設定表示期間より広い可視期間が必要になるため、`HomeViewModel` は `GraphUtil.MAX_ZOOM_OUT_FACTOR` 倍までの履歴を先読みする。
+- ジェスチャ中は UI ローカルの `transientWindowEndMs` と可視期間だけを更新し、指を離した時だけ `HomeViewModel.commitGraphViewport()` を呼んで DB 再読込を行う。
+- `HomeViewModel.commitGraphViewport()` には移動量だけでなく現在の可視期間も渡す。DB 保持範囲による下限丸めは設定表示期間ではなく現在の可視期間を使い、ピンチで短い期間に縮めた後も古い時刻へ辿れるようにする。
+- 時間範囲ラベルと X 軸は `transientWindowEndMs` を基準にしてジェスチャへ追従させるが、`ProcessedSeries` は操作開始前の完成済み系列を再利用する。
+- DB 再読込と `ProcessedSeries` 再集計はジェスチャ終了後の確定済み表示窓に対してだけ行い、ピンチイベントごとには実行しない。
+- ピンチインで設定表示期間より広い可視期間が必要になるため、`HomeViewModel` は `GraphUtil.MAX_ZOOM_OUT_FACTOR` 倍まで必要に応じて履歴を読む。現在の上限は 6 倍とする。
 - `HomeScreen` の最小 zoom 値も `GraphUtil.MAX_ZOOM_OUT_FACTOR` から計算し、UI の最大ピンチアウト量と DB 読込範囲を一致させる。
 - 系列生成は `produceState + Dispatchers.Default` でバックグラウンド実行し、描画中のジェスチャを止めない。
 - 一時的に系列生成が追いつかない場合に備え、`HomeScreen` は直前の正常系列を保持し、初回など直前系列も無い場合は `グラフ計算中...` を表示して空白状態を避ける。
 - `HomeScreen` のグラフ前処理は時系列昇順を前提とするため、DB 取得結果が新しい順でも描画前に timestamp 昇順へ正規化する。
 - `HomeScreen` は `HomeUiState.isCurrentLoaded` と `isGraphLoaded` を分けて扱い、現在値表示のロード状態とグラフ履歴のロード状態を分離する。グラフ履歴が未読込でも、現在値表示は独立して更新できるようにする。表示範囲に 2 件以上のデータが無い場合でも `最新へ戻す` 操作を出し、必要に応じて `HomeViewModel.recoverGraphWindowIfEmpty()` が最新ログ時刻へ復帰させる。
-- `HomeViewModel.graphWindowFlow` は Room `Flow` を `flatMapLatest` で都度つなぎ替えるのではなく、`lookbackMin + windowEndMs` の組を `conflate()` したうえで `getEntriesBetweenAscOnce()` / `getBetweenOnce()` を順次実行して履歴スナップショットを作る。これにより、3 秒ごとの最新追従で履歴クエリがキャンセルされ続け、グラフが永遠に `読込中` のままになるのを防ぐ。
+- `HomeViewModel.graphWindowFlow` は表示窓確定通知を 120 ms デバウンスしてから `conflate()` し、`getEntriesBetweenAscOnce()` / `getBetweenOnce()` を順次実行して履歴スナップショットを作る。これにより、倍率と表示終端の連続更新を最終状態へまとめる。
 - `HomeViewModel.graphWindowFlow` の読込範囲は、初回から常に `設定表示期間 × 2` を読むのではなく、`HomeScreen` から通知される現在の可視期間に合わせる。通常表示では `現在の可視期間 + 左 30 分の補間文脈` だけを読み、ピンチアウト時だけ必要な範囲まで段階的に広げる。
-- `HomeScreen` の `CombinedChart` は `snapshotFlow(graphStartMs to transientWindowEndMs).conflate()` で可視窓変更を取り込み、重い系列計算中に 3 秒更新が来ても前回計算を毎回キャンセルしない。ジェスチャや最新追従で窓端が細かく動いても、少なくとも 1 回は `ProcessedSeries` を完成させて描画へ渡す。
+- `HomeScreen` の `CombinedChart` は確定済み `windowEndMs` と可視期間、取得済み entries が変わった時だけ `ProcessedSeries` を再生成する。ジェスチャ中は直前の正常系列を保持して再集計しない。
 - グラフの X 軸は常に `graphStartMs..transientWindowEndMs` を基準に計算し、最初のデータ点時刻ではなく表示窓そのものを横比率の基準とする。
-- ドラッグ中の一時的な表示終端は、現在ロード済み履歴の最古時刻では制限しない。指を離した後に `HomeViewModel.shiftGraphWindowBy()` が DB 全体の最古・最新時刻で安全に丸め、新しい範囲を読み直す。
+- ドラッグ中の一時的な表示終端は、現在ロード済み履歴の最古時刻では制限しない。指を離した後に `HomeViewModel.commitGraphViewport()` が DB 全体の最古・最新時刻で安全に丸め、新しい範囲を読み直す。
 - 歩数系列は可視窓ごとに先頭値を差し引いて 0 始まりへ正規化し、可視窓内の増分が読み取りやすい形で描画する。
 - 歩数系列は `StepsDelta` の累積で作り、03:00 区切り日が切り替わった時点で累積を 0 に戻す（`GpsUtil.getLoggingStart(timestamp)` で日境界を判定）。
 - ホーム画面とウィジェットのグラフは、設定された lookback を優先し、データが無い区間は空白として表示する（X 軸は `windowEndMs - lookbackMs` を開始とする）。
 - 歩数グラフのモード色分けは、`MotionSample` から再構成した状態タイムラインを `GpsUtil.modesAt()` で 1 回だけ前進走査して各描画点へ割り当てる。各描画点ごとに状態履歴を先頭から再走査しない。
 - `HomeScreen` は現在表示中の開始時刻 / 終了時刻をラベル表示し、時間移動結果を視覚的に確認できるようにする。
-- `HomeViewModel.shiftGraphWindowBy()` は、保持データ期間が lookback より短い場合でも空区間にならないよう、表示終端時刻の下限を最新時刻側へ安全に丸める。
+- `HomeViewModel.commitGraphViewport()` は、保持データ期間が lookback より短い場合でも空区間にならないよう、表示終端時刻の下限を最新時刻側へ安全に丸める。
 - 調査用のグラフ操作ログは `verboseDebugLogEnabled` が ON の時だけ出力する。
 
 ### 3.7 Windows viewer 独立アプリ

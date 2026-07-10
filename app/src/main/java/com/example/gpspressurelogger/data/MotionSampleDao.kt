@@ -18,6 +18,9 @@ interface MotionSampleDao {
     @Query("SELECT * FROM motion_samples WHERE timestamp = :ts LIMIT 1")
     suspend fun findByTimestamp(ts: Long): MotionSample?
 
+    @Query("SELECT * FROM motion_samples WHERE timestamp IN (:timestamps)")
+    suspend fun findByTimestamps(timestamps: List<Long>): List<MotionSample>
+
     @Query("SELECT * FROM motion_samples WHERE timestamp >= :since ORDER BY timestamp DESC")
     fun getSince(since: Long): Flow<List<MotionSample>>
 

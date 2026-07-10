@@ -25,6 +25,9 @@ interface LogDao {
     @Query("SELECT * FROM log_entries WHERE timestamp = :ts LIMIT 1")
     suspend fun findByTimestamp(ts: Long): LogEntry?
 
+    @Query("SELECT * FROM log_entries WHERE timestamp IN (:timestamps)")
+    suspend fun findByTimestamps(timestamps: List<Long>): List<LogEntry>
+
     /** 指定タイムスタンプより古い全レコードを削除 */
     @Query("DELETE FROM log_entries WHERE timestamp < :ts")
     suspend fun deleteEntriesBefore(ts: Long)

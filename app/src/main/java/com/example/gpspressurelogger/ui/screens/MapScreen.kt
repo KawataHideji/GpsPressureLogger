@@ -21,6 +21,7 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.content.res.Resources
 import com.example.gpspressurelogger.ui.viewmodel.MapViewModel
+import com.example.gpspressurelogger.ui.viewmodel.MapRenderData
 import com.example.gpspressurelogger.util.GpsUtil
 import kotlinx.coroutines.delay
 import org.osmdroid.events.MapListener
@@ -34,6 +35,7 @@ import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Overlay
 import org.osmdroid.views.overlay.Polyline
 import com.example.gpspressurelogger.data.LogEntry
 import com.example.gpspressurelogger.data.MotionSample
@@ -51,6 +53,7 @@ fun MapScreen(
     val mapUiState by viewModel.mapUiState.collectAsState()
     val entries = mapUiState.entries
     val motionSamples = mapUiState.motionSamples
+    val renderData = mapUiState.renderData
     val targetDateStart = mapUiState.targetDateStart
     val dateFormatter = remember { SimpleDateFormat("yyyy年M月d日", Locale.JAPAN) }
     var lastAutoFitTarget by remember { mutableLongStateOf(Long.MIN_VALUE) }
@@ -224,6 +227,7 @@ fun MapScreen(
                                     mapView,
                                     displayEntries,
                                     motionSamples,
+                                    renderData,
                                     capturedShowLabels,
                                     capturedShowTrkLabels
                                 )
@@ -235,13 +239,13 @@ fun MapScreen(
                             }
                         } ?: run {
                             mapView.overlays.clear()
-                            renderMapOverlays(mapView, displayEntries, motionSamples, showStateLabels, showTrkLabels)
+                            renderMapOverlays(mapView, displayEntries, motionSamples, renderData, showStateLabels, showTrkLabels)
                             lastRenderSignature = renderSignature
                             mapView.invalidate()
                         }
                     } else {
                         mapView.overlays.clear()
-                        renderMapOverlays(mapView, displayEntries, motionSamples, showStateLabels, showTrkLabels)
+                        renderMapOverlays(mapView, displayEntries, motionSamples, renderData, showStateLabels, showTrkLabels)
                         lastRenderSignature = renderSignature
                         mapView.invalidate()
                     }
@@ -294,13 +298,14 @@ private fun renderMapOverlays(
     mapView: MapView,
     displayEntries: List<LogEntry>,
     motionSamples: List<com.example.gpspressurelogger.data.MotionSample>,
+    renderData: MapRenderData,
     showStateLabels: Boolean = false,
     showTrkLabels: Boolean = false
 ) {
-    val polylineTrack = GpsUtil.buildDisplayPolyline(displayEntries, motionSamples)
-    val stopMarkers = GpsUtil.clusterStops(displayEntries)
-    val polylineSegments = GpsUtil.splitTrackByMode(polylineTrack)
-    val gpsGapSegments = GpsUtil.buildGpsGapBreakSegments(polylineTrack)
+    val polylineTrack = renderData.polylineTrack
+    val stopMarkers = renderData.stopMarkers
+    val polylineSegments = renderData.polylineSegments
+    val gpsGapSegments = renderData.gpsGapSegments
     val density = mapView.context.resources.displayMetrics.density
     val directionMarkers = GpsUtil.computeDirectionArrowMarkersOnScreen(
         track = polylineTrack,
@@ -317,18 +322,13 @@ private fun renderMapOverlays(
     gpsGapSegments.forEach { segment ->
         drawGpsGapBreakPolyline(mapView, segment)
     }
-    directionMarkers.forEach { arrow ->
-        mapView.overlays.add(Marker(mapView).apply {
-            position = GeoPoint(arrow.lat, arrow.lon)
-            icon = createDirectionArrowDrawable(
-                resources = mapView.context.resources,
-                color = GpsUtil.modeColor(arrow.displayMode),
-                angleDeg = arrow.angleDeg,
+    if (directionMarkers.isNotEmpty()) {
+        mapView.overlays.add(
+            DirectionArrowOverlay(
+                markers = directionMarkers,
                 surface = GpsUtil.MarkerSurface.APP_MAP
             )
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-            setInfoWindow(null)
-        })
+        )
     }
 
     stopMarkers.filter { it.isStop }.forEach { pt ->
@@ -405,6 +405,54 @@ private fun drawGpsGapBreakPolyline(mapView: MapView, segment: GpsUtil.TrackSegm
         setPoints(segment.points.map { GeoPoint(it.lat, it.lon) })
     }
     mapView.overlays.add(polyline)
+}
+
+private class DirectionArrowOverlay(
+    private val markers: List<GpsUtil.DirectionArrowMarker>,
+    surface: GpsUtil.MarkerSurface
+) : Overlay() {
+    private val screenPoint = android.graphics.Point()
+    private val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE
+        textSize = GpsUtil.directionArrowTextSize(surface)
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+        style = Paint.Style.STROKE
+        strokeWidth = GpsUtil.directionArrowOutlineWidth(surface)
+        strokeJoin = Paint.Join.ROUND
+        strokeMiter = 10f
+    }
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = GpsUtil.directionArrowTextSize(surface)
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+        style = Paint.Style.FILL
+    }
+    private val baselineOffset = -(fillPaint.descent() + fillPaint.ascent()) / 2f
+
+    override fun draw(canvas: Canvas, projection: org.osmdroid.views.Projection) {
+        val clip = canvas.clipBounds
+        val margin = outlinePaint.textSize
+        markers.forEach { marker ->
+            projection.toPixels(GeoPoint(marker.lat, marker.lon), screenPoint)
+            val x = screenPoint.x.toFloat()
+            val y = screenPoint.y.toFloat()
+            if (
+                x < clip.left - margin ||
+                x > clip.right + margin ||
+                y < clip.top - margin ||
+                y > clip.bottom + margin
+            ) {
+                return@forEach
+            }
+            canvas.save()
+            canvas.rotate(marker.angleDeg, x, y)
+            canvas.drawText(">", x, y + baselineOffset, outlinePaint)
+            fillPaint.color = GpsUtil.modeColor(marker.displayMode)
+            canvas.drawText(">", x, y + baselineOffset, fillPaint)
+            canvas.restore()
+        }
+    }
 }
 
 private fun createCircleDrawable(
@@ -523,42 +571,5 @@ private fun createStateLabelDrawable(
     val baseline = (height - 2) / 2f - (textPaint.descent() + textPaint.ascent()) / 2f
     canvas.drawText(text, (width - 2) / 2f, baseline, textPaint)
 
-    return android.graphics.drawable.BitmapDrawable(resources, bmp)
-}
-
-private fun createDirectionArrowDrawable(
-    resources: Resources,
-    color: Int,
-    angleDeg: Float,
-    surface: GpsUtil.MarkerSurface
-): android.graphics.drawable.Drawable {
-    val textSize = GpsUtil.directionArrowTextSize(surface)
-    val padding = GpsUtil.directionArrowBitmapPadding(surface)
-    val outlineWidth = GpsUtil.directionArrowOutlineWidth(surface)
-    val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        this.color = android.graphics.Color.WHITE
-        this.textSize = textSize
-        textAlign = Paint.Align.CENTER
-        typeface = Typeface.DEFAULT_BOLD
-        style = Paint.Style.STROKE
-        strokeWidth = outlineWidth
-        strokeJoin = Paint.Join.ROUND
-        strokeMiter = 10f
-    }
-    val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        this.color = color
-        this.textSize = textSize
-        textAlign = Paint.Align.CENTER
-        typeface = Typeface.DEFAULT_BOLD
-        style = Paint.Style.FILL
-    }
-    val glyphWidth = maxOf(outlinePaint.measureText(">"), fillPaint.measureText(">"))
-    val size = (maxOf(glyphWidth, textSize) + padding * 2).toInt().coerceAtLeast((textSize + padding).toInt())
-    val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bmp)
-    canvas.rotate(angleDeg, size / 2f, size / 2f)
-    val baseline = size / 2f - (fillPaint.descent() + fillPaint.ascent()) / 2f
-    canvas.drawText(">", size / 2f, baseline, outlinePaint)
-    canvas.drawText(">", size / 2f, baseline, fillPaint)
     return android.graphics.drawable.BitmapDrawable(resources, bmp)
 }

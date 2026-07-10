@@ -22,7 +22,15 @@ import kotlinx.coroutines.launch
 data class MapUiState(
     val targetDateStart: Long = GpsUtil.getLoggingStart(System.currentTimeMillis()),
     val entries: List<LogEntry> = emptyList(),
-    val motionSamples: List<MotionSample> = emptyList()
+    val motionSamples: List<MotionSample> = emptyList(),
+    val renderData: MapRenderData = MapRenderData()
+)
+
+data class MapRenderData(
+    val polylineTrack: List<GpsUtil.TrackPoint> = emptyList(),
+    val stopMarkers: List<GpsUtil.TrackPoint> = emptyList(),
+    val polylineSegments: List<GpsUtil.TrackSegment> = emptyList(),
+    val gpsGapSegments: List<GpsUtil.TrackSegment> = emptyList()
 )
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -55,11 +63,19 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     GpsUtil.normalizeStopsForDisplay(preparedEntries, samples)
                 }
+                val polylineTrack = GpsUtil.buildDisplayPolyline(displayEntries, samples)
+                val renderData = MapRenderData(
+                    polylineTrack = polylineTrack,
+                    stopMarkers = GpsUtil.clusterStops(displayEntries),
+                    polylineSegments = GpsUtil.splitTrackByMode(polylineTrack),
+                    gpsGapSegments = GpsUtil.buildGpsGapBreakSegments(polylineTrack)
+                )
                 emit(
                     MapUiState(
                         targetDateStart = start,
                         entries = displayEntries,
-                        motionSamples = samples
+                        motionSamples = samples,
+                        renderData = renderData
                     )
                 )
             }
@@ -108,10 +124,9 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
-        // 今日表示中の地図 live 再読込周期。長すぎると track が伸びにくく、短すぎると
-        // パン・ズーム中の再描画頻度が上がるため 5 秒に設定。MapScreen 側の interaction
-        // ガードで、操作中はこの周期 emit でも再描画をスキップする。
-        private const val LIVE_REFRESH_INTERVAL_MS: Long = 5_000L
+        // 今日表示中の地図 live 再読込周期。3 秒 insert ごとの全日再処理を避けつつ、
+        // 地図を開いたままでも軌跡が更新されるよう 30 秒間隔にする。
+        private const val LIVE_REFRESH_INTERVAL_MS: Long = 30_000L
     }
 
     fun moveToNextDay() {

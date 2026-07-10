@@ -51,6 +51,7 @@ object ExportUtil {
     private const val DEBUG_DIR = "debug"
     private const val ANALYSIS_DIR = "analysis"
     private const val BATCH_SIZE = 1000
+    private const val IMPORT_LOOKUP_CHUNK_SIZE = 500
 
     /**
      * バックアップエクスポート / インポートで使う統一CSVのヘッダー（18カラム）。
@@ -984,10 +985,15 @@ object ExportUtil {
 
     private suspend fun flushBatch(db: AppDatabase, batch: MutableList<LogEntry>, overwrite: Boolean) {
         if (batch.isEmpty()) return
-        val toSave = mutableListOf<LogEntry>()
-        batch.forEach { incoming ->
-            val existing = db.logDao().findByTimestamp(incoming.timestamp)
-            toSave.add(if (existing == null) incoming else mergeEntries(existing, incoming, overwrite))
+        val existingByTimestamp = mutableMapOf<Long, LogEntry>()
+        batch.map { it.timestamp }.distinct().chunked(IMPORT_LOOKUP_CHUNK_SIZE).forEach { timestamps ->
+            db.logDao().findByTimestamps(timestamps).forEach { existing ->
+                existingByTimestamp[existing.timestamp] = existing
+            }
+        }
+        val toSave = batch.map { incoming ->
+            val existing = existingByTimestamp[incoming.timestamp]
+            if (existing == null) incoming else mergeEntries(existing, incoming, overwrite)
         }
         db.logDao().insertAllReplace(toSave)
         batch.clear()
@@ -995,10 +1001,15 @@ object ExportUtil {
 
     private suspend fun flushMotionBatch(db: AppDatabase, batch: MutableList<MotionSample>, overwrite: Boolean) {
         if (batch.isEmpty()) return
-        val toSave = mutableListOf<MotionSample>()
-        batch.forEach { incoming ->
-            val existing = db.motionSampleDao().findByTimestamp(incoming.timestamp)
-            toSave.add(if (existing == null) incoming else mergeMotionSamples(existing, incoming, overwrite))
+        val existingByTimestamp = mutableMapOf<Long, MotionSample>()
+        batch.map { it.timestamp }.distinct().chunked(IMPORT_LOOKUP_CHUNK_SIZE).forEach { timestamps ->
+            db.motionSampleDao().findByTimestamps(timestamps).forEach { existing ->
+                existingByTimestamp[existing.timestamp] = existing
+            }
+        }
+        val toSave = batch.map { incoming ->
+            val existing = existingByTimestamp[incoming.timestamp]
+            if (existing == null) incoming else mergeMotionSamples(existing, incoming, overwrite)
         }
         db.motionSampleDao().insertAllReplace(toSave)
         batch.clear()
@@ -1139,8 +1150,16 @@ object ExportUtil {
                     }
                 }
             }
-            if (entryBatch.isNotEmpty()) { flushBatch(db, entryBatch, overwrite); count += entryBatch.size }
-            if (motionBatch.isNotEmpty()) { flushMotionBatch(db, motionBatch, overwrite); count += motionBatch.size }
+            if (entryBatch.isNotEmpty()) {
+                val remaining = entryBatch.size
+                flushBatch(db, entryBatch, overwrite)
+                count += remaining
+            }
+            if (motionBatch.isNotEmpty()) {
+                val remaining = motionBatch.size
+                flushMotionBatch(db, motionBatch, overwrite)
+                count += remaining
+            }
         } catch (e: Throwable) {
             parseErrors += ImportIssue(fileName, message = "ファイル読込失敗: ${e.message}")
         }

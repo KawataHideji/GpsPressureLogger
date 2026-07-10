@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
@@ -52,6 +53,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val GRAPH_INTERPOLATION_CONTEXT_MS = 30 * 60_000L
         const val GRAPH_MIN_VISIBLE_LOOKBACK_MS = 30 * 60_000L
+        const val GRAPH_VIEWPORT_SETTLE_MS = 120L
     }
 
     private val graphWindowController = GraphWindowController(
@@ -128,6 +130,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         emit(CurrentMetricsData(isLoaded = true))
     }
 
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
     private val graphWindowFlow: Flow<GraphWindowData> =
         combine(
             lookbackMinFlow,
@@ -137,6 +140,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             Triple(lookbackMin, windowEnd, requestedVisibleLookback)
         }
         .distinctUntilChanged()
+        .debounce(GRAPH_VIEWPORT_SETTLE_MS)
         .conflate()
         .map { (lookbackMin, windowEnd, requestedVisibleLookback) ->
             val configuredLookbackMs = lookbackMin * 60_000L
@@ -236,31 +240,25 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun shiftGraphWindowBy(deltaMs: Long, visibleLookbackMs: Long) {
-        viewModelScope.launch {
-            val oldest = db.logDao().getOldestTimestamp() ?: return@launch
-            val latest = db.logDao().getLatest()?.timestamp ?: return@launch
-            val configuredLookbackMs = settings.lookbackMin.first() * 60_000L
-            graphWindowController.shiftBy(
-                deltaMs = deltaMs,
-                visibleLookbackMs = visibleLookbackMs,
-                oldestTimestampMs = oldest,
-                latestTimestampMs = latest,
-                configuredLookbackMs = configuredLookbackMs
-            )
-        }
-    }
-
-    fun updateGraphVisibleLookback(visibleLookbackMs: Long) {
+    fun commitGraphViewport(deltaMs: Long, visibleLookbackMs: Long) {
         viewModelScope.launch {
             val configuredLookbackMs = settings.lookbackMin.first() * 60_000L
             val clampedVisibleLookbackMs = visibleLookbackMs.coerceIn(
                 GRAPH_MIN_VISIBLE_LOOKBACK_MS,
                 configuredLookbackMs * GraphUtil.MAX_ZOOM_OUT_FACTOR
             )
-            if (requestedVisibleLookbackMs.value != clampedVisibleLookbackMs) {
-                requestedVisibleLookbackMs.value = clampedVisibleLookbackMs
-            }
+            requestedVisibleLookbackMs.value = clampedVisibleLookbackMs
+            if (deltaMs == 0L) return@launch
+
+            val oldest = db.logDao().getOldestTimestamp() ?: return@launch
+            val latest = db.logDao().getLatest()?.timestamp ?: return@launch
+            graphWindowController.shiftBy(
+                deltaMs = deltaMs,
+                visibleLookbackMs = clampedVisibleLookbackMs,
+                oldestTimestampMs = oldest,
+                latestTimestampMs = latest,
+                configuredLookbackMs = configuredLookbackMs
+            )
         }
     }
 

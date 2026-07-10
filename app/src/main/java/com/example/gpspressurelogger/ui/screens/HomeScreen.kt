@@ -2,11 +2,8 @@ package com.example.gpspressurelogger.ui.screens
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Place
@@ -20,6 +17,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -40,8 +38,8 @@ import java.util.*
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.withContext
 
 // 系列カラー
@@ -114,8 +112,8 @@ fun HomeScreen(
                         motionSamples = uiState.motionHistory,
                         lookbackMin = uiState.lookbackMin,
                         windowEndMs = uiState.graphWindowEndMs,
-                        onVisibleLookbackChanged = viewModel::updateGraphVisibleLookback,
-                        onWindowShift = viewModel::shiftGraphWindowBy,
+                        latestTimestampMs = uiState.latestTimestampMs,
+                        onViewportCommit = viewModel::commitGraphViewport,
                         onResetWindow = viewModel::resetGraphWindowToLatest,
                         modifier = Modifier.fillMaxSize().padding(8.dp)
                     )
@@ -168,8 +166,8 @@ private fun CombinedChart(
     motionSamples: List<MotionSample>,
     lookbackMin: Int,
     windowEndMs: Long,
-    onVisibleLookbackChanged: (Long) -> Unit,
-    onWindowShift: (Long, Long) -> Unit,
+    latestTimestampMs: Long?,
+    onViewportCommit: (Long, Long) -> Unit,
     onResetWindow: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -180,9 +178,10 @@ private fun CombinedChart(
     var zoomX by remember { mutableFloatStateOf(1f) }
     var canvasWidthPx by remember { mutableFloatStateOf(1f) }
     var canvasHeightPx by remember { mutableFloatStateOf(1f) }
-    var lastGestureLogMs by remember { mutableLongStateOf(0L) }
     var transientWindowEndMs by remember(windowEndMs) { mutableLongStateOf(windowEndMs) }
     var gestureActive by remember { mutableStateOf(false) }
+    var gestureVisibleLookbackMs by remember { mutableLongStateOf(0L) }
+    var committedVisibleLookbackMs by remember(lookbackMin) { mutableLongStateOf(baseLookbackMs) }
     val visibleLookbackMs = remember(lookbackMin, zoomX) {
         (baseLookbackMs / zoomX).toLong().coerceAtLeast(30 * 60_000L)
     }
@@ -190,68 +189,36 @@ private fun CombinedChart(
     val latestVisibleLookbackMs by rememberUpdatedState(visibleLookbackMs)
     val latestWindowEndMs by rememberUpdatedState(transientWindowEndMs)
     val latestCanvasWidthPx by rememberUpdatedState(canvasWidthPx)
-    val latestLoadedNewestMs by rememberUpdatedState(entriesAsc.lastOrNull()?.timestamp ?: windowEndMs)
+    val latestKnownNewestMs by rememberUpdatedState(latestTimestampMs ?: entriesAsc.lastOrNull()?.timestamp ?: windowEndMs)
 
     LaunchedEffect(windowEndMs) {
         if (!gestureActive) {
             transientWindowEndMs = windowEndMs
         }
     }
-    LaunchedEffect(visibleLookbackMs) {
-        onVisibleLookbackChanged(visibleLookbackMs)
-    }
-
-    val dragState = rememberDraggableState { delta ->
-        val widthPx = latestCanvasWidthPx
-        if (widthPx <= 1f) return@rememberDraggableState
-        val lookbackMs = latestVisibleLookbackMs
-        val shiftMs = (-(delta / widthPx) * lookbackMs * GRAPH_DRAG_SENSITIVITY).toLong()
-        if (shiftMs == 0L) return@rememberDraggableState
-        val maxWindowEnd = maxOf(latestLoadedNewestMs, latestWindowEndMs)
-        transientWindowEndMs = (latestWindowEndMs + shiftMs).coerceIn(0L, maxWindowEnd)
-        val now = System.currentTimeMillis()
-        if (now - lastGestureLogMs >= 250L) {
-            lastGestureLogMs = now
-            ExportUtil.writeVerboseDebugLog(
-                context,
-                "GRAPH_DRAG: deltaPx=$delta shiftMs=$shiftMs widthPx=$widthPx visibleLookbackMs=$lookbackMs windowEndMs=$latestWindowEndMs"
-            )
-        }
-    }
-    val transformState = rememberTransformableState { zoomChange, _, _ ->
-        if (!zoomChange.isFinite() || zoomChange == 1f) return@rememberTransformableState
-        val minZoomX = 1f / GraphUtil.MAX_ZOOM_OUT_FACTOR.toFloat()
-        val candidateZoomX = (zoomX * zoomChange).coerceIn(minZoomX, 20f)
-        zoomX = candidateZoomX
-        val now = System.currentTimeMillis()
-        if (now - lastGestureLogMs >= 250L) {
-            lastGestureLogMs = now
-            ExportUtil.writeVerboseDebugLog(
-                context,
-                "GRAPH_TRANSFORM: zoomChange=$zoomChange zoomX=$zoomX widthPx=$latestCanvasWidthPx visibleLookbackMs=$latestVisibleLookbackMs windowEndMs=$latestWindowEndMs"
-            )
-        }
+    LaunchedEffect(lookbackMin) {
+        committedVisibleLookbackMs = baseLookbackMs
+        onViewportCommit(0L, baseLookbackMs)
     }
 
     var lastStableSeries by remember { mutableStateOf<GraphUtil.ProcessedSeries?>(null) }
     val computedSeries by produceState<GraphUtil.ProcessedSeries?>(
         initialValue = null,
         entriesAsc,
-        motionSamples
+        motionSamples,
+        windowEndMs,
+        committedVisibleLookbackMs
     ) {
-        snapshotFlow { graphStartMs to transientWindowEndMs }
-            .conflate()
-            .collect { (windowStartMs, windowEndMsForSeries) ->
-                value = withContext(Dispatchers.Default) {
-                    GraphUtil.getProcessedSeriesForWindow(
-                        entries = entriesAsc,
-                        motionSamples = motionSamples,
-                        intervalMs = 30_000L,
-                        windowStartMs = windowStartMs,
-                        windowEndMs = windowEndMsForSeries
-                    )
-                }
-            }
+        val committedWindowStartMs = (windowEndMs - committedVisibleLookbackMs).coerceAtLeast(0L)
+        value = withContext(Dispatchers.Default) {
+            GraphUtil.getProcessedSeriesForWindow(
+                entries = entriesAsc,
+                motionSamples = motionSamples,
+                intervalMs = 30_000L,
+                windowStartMs = committedWindowStartMs,
+                windowEndMs = windowEndMs
+            )
+        }
     }
     LaunchedEffect(computedSeries) {
         if (computedSeries != null) {
@@ -334,24 +301,84 @@ private fun CombinedChart(
                     "GRAPH_SIZE: widthPx=${it.width} heightPx=${it.height} lookbackMin=$lookbackMin windowEndMs=$windowEndMs"
                 )
             }
-            .draggable(
-                orientation = Orientation.Horizontal,
-                state = dragState,
-                onDragStarted = {
+            .pointerInput(baseLookbackMs, latestTimestampMs) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
                     gestureActive = true
-                },
-                onDragStopped = {
-                    gestureActive = false
-                    val totalShiftMs = transientWindowEndMs - windowEndMs
-                    if (totalShiftMs != 0L) {
-                        onWindowShift(totalShiftMs, visibleLookbackMs)
+                    gestureVisibleLookbackMs = latestVisibleLookbackMs
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            if (pressed.isEmpty()) break
+
+                            val widthPx = latestCanvasWidthPx
+                            if (widthPx <= 1f) continue
+
+                            if (pressed.size >= 2) {
+                                val active = pressed.filter { it.previousPressed }
+                                if (active.size >= 2) {
+                                    val currentCentroidX = active.map { it.position.x }.average().toFloat()
+                                    val previousCentroidX = active.map { it.previousPosition.x }.average().toFloat()
+                                    val currentCentroidY = active.map { it.position.y }.average().toFloat()
+                                    val previousCentroidY = active.map { it.previousPosition.y }.average().toFloat()
+                                    val currentDistance = active.map {
+                                        val dx = it.position.x - currentCentroidX
+                                        val dy = it.position.y - currentCentroidY
+                                        sqrt(dx * dx + dy * dy)
+                                    }.average().toFloat()
+                                    val previousDistance = active.map {
+                                        val dx = it.previousPosition.x - previousCentroidX
+                                        val dy = it.previousPosition.y - previousCentroidY
+                                        sqrt(dx * dx + dy * dy)
+                                    }.average().toFloat()
+                                    val oldLookbackMs = latestVisibleLookbackMs
+                                    val minZoomX = 1f / GraphUtil.MAX_ZOOM_OUT_FACTOR.toFloat()
+                                    val zoomChange = if (previousDistance > 1f) currentDistance / previousDistance else 1f
+                                    val nextZoomX = if (zoomChange.isFinite()) {
+                                        (zoomX * zoomChange).coerceIn(minZoomX, 20f)
+                                    } else {
+                                        zoomX
+                                    }
+                                    val newLookbackMs = (baseLookbackMs / nextZoomX)
+                                        .toLong()
+                                        .coerceAtLeast(30 * 60_000L)
+                                    val focalRatio = (previousCentroidX / widthPx).coerceIn(0f, 1f)
+                                    val oldWindowStartMs = (latestWindowEndMs - oldLookbackMs).coerceAtLeast(0L)
+                                    val focalTimeMs = oldWindowStartMs + (oldLookbackMs * focalRatio).toLong()
+                                    val panShiftMs = (-(currentCentroidX - previousCentroidX) / widthPx * newLookbackMs).toLong()
+                                    val maxWindowEnd = maxOf(latestKnownNewestMs, latestWindowEndMs)
+                                    val nextWindowEndMs = (
+                                        focalTimeMs +
+                                            (newLookbackMs * (1f - focalRatio)).toLong() +
+                                            panShiftMs
+                                        ).coerceIn(0L, maxWindowEnd)
+                                    zoomX = nextZoomX
+                                    gestureVisibleLookbackMs = newLookbackMs
+                                    transientWindowEndMs = nextWindowEndMs
+                                }
+                            } else {
+                                val delta = pressed.first().position.x - pressed.first().previousPosition.x
+                                val lookbackMs = latestVisibleLookbackMs
+                                val shiftMs = (-(delta / widthPx) * lookbackMs * GRAPH_DRAG_SENSITIVITY).toLong()
+                                if (shiftMs != 0L) {
+                                    val maxWindowEnd = maxOf(latestKnownNewestMs, latestWindowEndMs)
+                                    transientWindowEndMs = (latestWindowEndMs + shiftMs).coerceIn(0L, maxWindowEnd)
+                                    gestureVisibleLookbackMs = lookbackMs
+                                }
+                            }
+
+                            event.changes.forEach { if (it.pressed) it.consume() }
+                        }
+                    } finally {
+                        gestureActive = false
+                        val finalLookbackMs = gestureVisibleLookbackMs.takeIf { it > 0L } ?: visibleLookbackMs
+                        committedVisibleLookbackMs = finalLookbackMs
+                        val totalShiftMs = transientWindowEndMs - windowEndMs
+                        onViewportCommit(totalShiftMs, finalLookbackMs)
                     }
                 }
-            )
-            .transformable(
-                state = transformState,
-                canPan = { false }
-            )
+            }
     ) {
         Text(
             text = "${fmtTime.format(Date(axisStartMs))} - ${fmtTime.format(Date(transientWindowEndMs))}",
