@@ -20,7 +20,12 @@ class GpsLoggerApplication : Application() {
         // OSMDroid の設定
         // Android 11以降は外部ストレージ不可 → アプリ内部キャッシュを指定
         val config = Configuration.getInstance()
-        config.userAgentValue = packageName
+        // OSM Foundation の tile 利用ポリシー
+        // (https://operations.osmfoundation.org/policies/tiles/) は "com.example.*" のような
+        // Android Studio テンプレ由来のパッケージ名を User-Agent に使うアプリを 403 でブロックする。
+        // packageName をそのまま渡すと com.example.gpspressurelogger になって撃墜されるため、
+        // "com.example" を一切含まない自前の識別子を送る（MapWidgetReceiver 側の値と一貫）。
+        config.userAgentValue = "GpsPressureLogger/1.0 (github.com/KawataHideji/GpsPressureLogger)"
         val osmBase = File(cacheDir, "osmdroid")
         osmBase.mkdirs()
         config.osmdroidBasePath = osmBase
